@@ -3,7 +3,7 @@
 
 TOP := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 PGCOPYDB ?= $(TOP)src/bin/pgcopydb/pgcopydb
-PGVERSION ?= 17
+PGVERSION ?= 16
 
 all: bin ;
 
