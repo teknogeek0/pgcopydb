@@ -3387,9 +3387,11 @@ pg_copy_large_object(PGSQL *src,
 	 *    When using --drop-if-exists, we first try to unlink the
 	 *    target large object, then copy the data all over again.
 	 *
-	 *    In normal cases `pg_dump --section=pre-data` outputs the
-	 *    large object metadata and we only have to take care of the
-	 *    contents of the large objects.
+	 *    In PostgreSQL 16 and earlier, `pg_dump --section=pre-data` outputs
+	 *    the large object metadata and we only have to take care of the
+	 *    contents of the large objects. Starting with PostgreSQL 17, pg_dump
+	 *    no longer includes large object metadata in pre-data, so we need to
+	 *    create the large object if it doesn't exist.
 	 */
 	if (dropIfExists)
 	{
@@ -3398,25 +3400,31 @@ pg_copy_large_object(PGSQL *src,
 			/* ignore errors, the object might not exists */
 			log_debug("Failed to delete large object %u", blobOid);
 		}
+	}
 
-		Oid dstBlobOid = lo_create(dst->connection, blobOid);
+	/* Create the large object with the specified OID if it doesn't exist */
+	Oid dstBlobOid = lo_create(dst->connection, blobOid);
 
-		if (dstBlobOid != blobOid)
-		{
-			char context[BUFSIZE] = { 0 };
+	if (dstBlobOid == InvalidOid)
+	{
+		char context[BUFSIZE] = { 0 };
 
-			sformat(context, sizeof(context),
-					"Failed to create large object %u", blobOid);
+		sformat(context, sizeof(context),
+				"Failed to create large object %u", blobOid);
 
-			(void) pgcopy_log_error(dst, NULL, context);
+		(void) pgcopy_log_error(dst, NULL, context);
 
-			lo_close(src->connection, srcfd);
+		lo_close(src->connection, srcfd);
 
-			pgsql_finish(src);
-			pgsql_finish(dst);
+		pgsql_finish(src);
+		pgsql_finish(dst);
 
-			return false;
-		}
+		return false;
+	}
+	else if (dstBlobOid != blobOid)
+	{
+		/* Large object already exists, which is fine */
+		log_debug("Large object %u already exists on target", blobOid);
 	}
 
 	/*
