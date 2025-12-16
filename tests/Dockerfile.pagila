@@ -1,10 +1,12 @@
 ARG PGVERSION=16
 ARG PGCOPYDB_IMAGE=pgcopydb:latest
 
+# Create a named stage from the pgcopydb image for COPY --from
+FROM $PGCOPYDB_IMAGE as pgcopydb_source
+
 FROM debian:bookworm-slim
 
 ARG PGVERSION
-ARG PGCOPYDB_IMAGE
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
@@ -46,8 +48,8 @@ RUN git clone --depth 1 https://github.com/devrimgunduz/pagila.git
 RUN useradd -rm -d /var/lib/postgres -s /bin/bash -g postgres -G sudo docker
 RUN echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
 
-COPY --from=$PGCOPYDB_IMAGE /usr/local/bin/sqlite3 /usr/local/bin
-COPY --from=$PGCOPYDB_IMAGE /usr/local/bin/pgcopydb /usr/local/bin
+COPY --from=pgcopydb_source /usr/local/bin/sqlite3 /usr/local/bin
+COPY --from=pgcopydb_source /usr/local/bin/pgcopydb /usr/local/bin
 
 COPY .psqlrc /var/lib/postgres
 COPY .sqliterc /var/lib/postgres
