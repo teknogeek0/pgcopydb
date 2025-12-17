@@ -52,6 +52,12 @@ services:
       chmod 0700 /var/lib/postgresql/data
       postgres -c ssl=on -c ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem -c ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
      "
+    healthcheck:
+      test: 'pg_isready -U postgres --dbname=pagila'
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     depends_on:
       source:
         condition: service_healthy
@@ -86,6 +92,6 @@ services:
       source:
         condition: service_healthy
       source-standby:
-        condition: service_started
+        condition: service_healthy
       target:
         condition: service_healthy
