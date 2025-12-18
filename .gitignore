@@ -42,3 +42,6 @@ lib*.pc
 /GIT-VERSION-FILE
 /version
 ci/Dockerfile.docs
+
+# Local development guide
+CLAUDE.md
