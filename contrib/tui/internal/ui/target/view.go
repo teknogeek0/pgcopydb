@@ -111,7 +111,7 @@ func Render(th *theme.Theme, width, height int, data Data) string {
 func countPopulatedTables(summaries []metrics.CatalogSummaryEntry) int {
 	done := make(map[int64]bool)
 	for _, s := range summaries {
-		if s.TableOID > 0 && s.DoneTimeEpoch > 0 && s.Command == "COPY" {
+		if s.TableOID > 0 && s.DoneTimeEpoch > 0 && strings.HasPrefix(s.Command, "COPY") {
 			done[s.TableOID] = true
 		}
 	}

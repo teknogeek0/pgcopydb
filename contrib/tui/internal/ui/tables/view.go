@@ -137,7 +137,7 @@ func Render(th *theme.Theme, width, height int, data Data) string {
 func buildSummaryMap(summaries []metrics.CatalogSummaryEntry) map[int64]metrics.CatalogSummaryEntry {
 	m := make(map[int64]metrics.CatalogSummaryEntry)
 	for _, s := range summaries {
-		if s.TableOID > 0 && s.Command == "COPY" {
+		if s.TableOID > 0 && strings.HasPrefix(s.Command, "COPY") {
 			existing, ok := m[s.TableOID]
 			if !ok || s.Bytes > existing.Bytes {
 				m[s.TableOID] = s

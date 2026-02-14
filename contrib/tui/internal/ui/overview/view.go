@@ -134,7 +134,7 @@ func computeProgress(tables []metrics.CatalogTable, summaries []metrics.CatalogS
 	}
 
 	for _, s := range summaries {
-		if s.Bytes > 0 && s.Command == "COPY" {
+		if s.Bytes > 0 && strings.HasPrefix(s.Command, "COPY") {
 			copied += s.Bytes
 		}
 	}
@@ -145,7 +145,7 @@ func computeProgress(tables []metrics.CatalogTable, summaries []metrics.CatalogS
 func countDoneTables(tables []metrics.CatalogTable, summaries []metrics.CatalogSummaryEntry) int {
 	done := make(map[int64]bool)
 	for _, s := range summaries {
-		if s.TableOID > 0 && s.DoneTimeEpoch > 0 && s.Command == "COPY" {
+		if s.TableOID > 0 && s.DoneTimeEpoch > 0 && strings.HasPrefix(s.Command, "COPY") {
 			done[s.TableOID] = true
 		}
 	}
@@ -159,7 +159,7 @@ func renderDataSummary(th *theme.Theme, total, copied int64, summaries []metrics
 	// Compute average speed from summaries
 	var totalDuration int64
 	for _, s := range summaries {
-		if s.Command == "COPY" && s.Duration > 0 {
+		if strings.HasPrefix(s.Command, "COPY") && s.Duration > 0 {
 			totalDuration += s.Duration
 		}
 	}

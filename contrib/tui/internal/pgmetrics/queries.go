@@ -3,7 +3,7 @@ package pgmetrics
 const (
 	QueryVersion = `SELECT version()`
 
-	QueryUptime = `SELECT now() - pg_postmaster_start_time()`
+	QueryUptime = `SELECT (now() - pg_postmaster_start_time())::text`
 
 	QueryDatabaseStats = `
 		SELECT
@@ -73,7 +73,7 @@ const (
 			coalesce(wait_event_type, '-') AS wait_event_type,
 			coalesce(wait_event, '-') AS wait_event,
 			coalesce(query, '') AS query,
-			EXTRACT(EPOCH FROM (now() - query_start))::float8 AS duration_seconds
+			coalesce(EXTRACT(EPOCH FROM (now() - query_start))::float8, 0) AS duration_seconds
 		FROM pg_stat_activity
 		WHERE backend_type = 'client backend'
 			AND pid != pg_backend_pid()
