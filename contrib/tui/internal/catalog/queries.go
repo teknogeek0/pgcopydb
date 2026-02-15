@@ -39,6 +39,18 @@ const (
 		LEFT JOIN s_table_size ts ON ts.oid = t.oid
 		ORDER BY coalesce(ts.bytes, 0) DESC`
 
+	QueryIndexes = `
+		SELECT
+			i.oid,
+			coalesce(i.qname, ''),
+			coalesce(i.relname, ''),
+			coalesce(i.tableoid, 0),
+			coalesce(i.isprimary, 0),
+			coalesce(i.isunique, 0),
+			coalesce(i.columns, '')
+		FROM s_index i
+		ORDER BY i.tableoid, i.oid`
+
 	QueryTableParts = `
 		SELECT
 			oid,

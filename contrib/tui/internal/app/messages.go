@@ -12,6 +12,7 @@ type CatalogDataMsg struct {
 	Setup     *metrics.CatalogSetup
 	Sections  []metrics.CatalogSection
 	Tables    []metrics.CatalogTable
+	Indexes   []metrics.CatalogIndex
 	Summaries []metrics.CatalogSummaryEntry
 	Timings   []metrics.CatalogTiming
 	Sentinel  *metrics.CatalogSentinel

@@ -14,8 +14,9 @@ type KeyMap struct {
 	Down    key.Binding
 	Top     key.Binding
 	Bottom  key.Binding
-	Sort    key.Binding
-	Filter  key.Binding
+	Sort       key.Binding
+	ToggleIdx  key.Binding
+	Filter     key.Binding
 	Help    key.Binding
 	Quit    key.Binding
 }
@@ -32,8 +33,9 @@ var Keys = KeyMap{
 	Down:    key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("j/down", "down")),
 	Top:     key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "top")),
 	Bottom:  key.NewBinding(key.WithKeys("G"), key.WithHelp("G", "bottom")),
-	Sort:    key.NewBinding(key.WithKeys("s", "S"), key.WithHelp("s", "sort")),
-	Filter:  key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
+	Sort:      key.NewBinding(key.WithKeys("s", "S"), key.WithHelp("s", "sort")),
+	ToggleIdx: key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "toggle indexes")),
+	Filter:    key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
 	Help:    key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 	Quit:    key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 }

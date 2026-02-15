@@ -76,7 +76,7 @@ func Render(th *theme.Theme, width, height int, data Data) string {
 				fmt.Sprintf("%.1f", db.CacheHitRatio),
 			})
 		}
-		b.WriteString(components.RenderTable(th, cols, rows, -1, len(rows), -1, contentWidth))
+		b.WriteString(components.RenderTable(th, cols, rows, -1, len(rows), -1, contentWidth, ""))
 		b.WriteString("\n")
 	}
 

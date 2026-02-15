@@ -134,7 +134,7 @@ func Render(th *theme.Theme, width, height int, data Data) string {
 		visibleRows = 5
 	}
 
-	b.WriteString(components.RenderTable(th, cols, tableRows, data.Cursor, visibleRows, data.SortCol, contentWidth))
+	b.WriteString(components.RenderTable(th, cols, tableRows, data.Cursor, visibleRows, data.SortCol, contentWidth, ""))
 
 	return lipgloss.NewStyle().Padding(1, 2).Render(b.String())
 }

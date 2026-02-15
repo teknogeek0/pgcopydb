@@ -67,7 +67,7 @@ func Render(th *theme.Theme, width, height int, data Data) string {
 				fmt.Sprintf("%.1f", db.CacheHitRatio),
 			})
 		}
-		b.WriteString(components.RenderTable(th, cols, rows, -1, len(rows), -1, contentWidth))
+		b.WriteString(components.RenderTable(th, cols, rows, -1, len(rows), -1, contentWidth, ""))
 		b.WriteString("\n")
 	}
 
@@ -152,7 +152,7 @@ func Render(th *theme.Theme, width, height int, data Data) string {
 				r.ReplayLag,
 			})
 		}
-		b.WriteString(components.RenderTable(th, cols, rows, -1, len(rows), -1, contentWidth))
+		b.WriteString(components.RenderTable(th, cols, rows, -1, len(rows), -1, contentWidth, ""))
 		b.WriteString("\n")
 	}
 
@@ -183,7 +183,7 @@ func Render(th *theme.Theme, width, height int, data Data) string {
 		if visibleRows < 5 {
 			visibleRows = 5
 		}
-		b.WriteString(components.RenderTable(th, cols, rows, data.Cursor, visibleRows, -1, contentWidth))
+		b.WriteString(components.RenderTable(th, cols, rows, data.Cursor, visibleRows, -1, contentWidth, ""))
 	}
 
 	return lipgloss.NewStyle().Padding(1, 2).Render(b.String())

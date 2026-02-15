@@ -34,6 +34,7 @@ func (m *Model) View() string {
 		Setup:     m.catalogSetup,
 		Sections:  m.catalogSections,
 		Tables:    m.catalogTables,
+		Indexes:   m.catalogIndexes,
 		Summaries: m.catalogSummaries,
 		Timings:   m.catalogTimings,
 		Sentinel:  m.catalogSentinel,
@@ -70,6 +71,7 @@ func (m *Model) View() string {
 		TablesCursor:  m.tablesCursor,
 		TablesSortCol: m.tablesSortCol,
 		FilterText:    m.filterText,
+		ShowIndexes:   m.showIndexes,
 	})
 
 	// Filter bar
@@ -106,7 +108,7 @@ func (m *Model) renderTabContent(height int) string {
 }
 
 func (m *Model) renderStatusBar() string {
-	left := " j/k:scroll s:sort /:filter ?:help q:quit"
+	left := " j/k:scroll s:sort i:indexes /:filter ?:help q:quit"
 
 	var right string
 	if m.lastErr != nil {
@@ -162,6 +164,7 @@ func (m *Model) renderHelp() string {
 
   Actions
     s                  Cycle sort column
+    i                  Toggle index rows
     /                  Filter mode (type to filter, enter to confirm, esc to cancel)
     ?                  Toggle this help
 

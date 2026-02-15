@@ -7,6 +7,7 @@ type CatalogProvider interface {
 	Setup(ctx context.Context) (*CatalogSetup, error)
 	Sections(ctx context.Context) ([]CatalogSection, error)
 	Tables(ctx context.Context) ([]CatalogTable, error)
+	Indexes(ctx context.Context) ([]CatalogIndex, error)
 	TableParts(ctx context.Context, oid int64) ([]CatalogTablePart, error)
 	ActiveProcesses(ctx context.Context) ([]CatalogProcess, error)
 	Summaries(ctx context.Context) ([]CatalogSummaryEntry, error)
@@ -64,6 +65,16 @@ type CatalogTable struct {
 	BytesPretty    string
 	ExcludeData    bool
 	PartKey        string
+}
+
+type CatalogIndex struct {
+	OID       int64
+	QName     string
+	RelName   string
+	TableOID  int64
+	IsPrimary bool
+	IsUnique  bool
+	Columns   string
 }
 
 type CatalogTablePart struct {

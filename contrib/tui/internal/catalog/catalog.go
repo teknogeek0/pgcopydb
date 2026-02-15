@@ -83,6 +83,27 @@ func (p *Provider) Tables(ctx context.Context) ([]metrics.CatalogTable, error) {
 	return result, rows.Err()
 }
 
+func (p *Provider) Indexes(ctx context.Context) ([]metrics.CatalogIndex, error) {
+	rows, err := p.db.QueryContext(ctx, QueryIndexes)
+	if err != nil {
+		return nil, fmt.Errorf("query indexes: %w", err)
+	}
+	defer rows.Close()
+
+	var result []metrics.CatalogIndex
+	for rows.Next() {
+		var idx metrics.CatalogIndex
+		if err := rows.Scan(
+			&idx.OID, &idx.QName, &idx.RelName,
+			&idx.TableOID, &idx.IsPrimary, &idx.IsUnique, &idx.Columns,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, idx)
+	}
+	return result, rows.Err()
+}
+
 func (p *Provider) TableParts(ctx context.Context, oid int64) ([]metrics.CatalogTablePart, error) {
 	rows, err := p.db.QueryContext(ctx, QueryTableParts, oid)
 	if err != nil {

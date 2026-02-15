@@ -19,6 +19,7 @@ type Data struct {
 	Setup     *metrics.CatalogSetup
 	Sections  []metrics.CatalogSection
 	Tables    []metrics.CatalogTable
+	Indexes   []metrics.CatalogIndex
 	Summaries []metrics.CatalogSummaryEntry
 	Timings   []metrics.CatalogTiming
 	Sentinel  *metrics.CatalogSentinel
@@ -52,9 +53,10 @@ type Data struct {
 	WalRate   float64
 
 	// UI state
-	TablesCursor int
+	TablesCursor  int
 	TablesSortCol int
-	FilterText   string
+	FilterText    string
+	ShowIndexes   bool
 }
 
 // Render produces the single-page dashboard content.
@@ -609,6 +611,7 @@ func renderTopTables(th *theme.Theme, sectionStyle lipgloss.Style, contentWidth,
 			continue
 		}
 		row := tableRow{
+			tableOID:  t.OID,
 			name:      t.QName,
 			totalSize: t.Bytes,
 		}
@@ -676,6 +679,24 @@ func renderTopTables(th *theme.Theme, sectionStyle lipgloss.Style, contentWidth,
 		{Title: "Status", Width: statusW},
 	}
 
+	// Build index lookup maps
+	indexesByTable := make(map[int64][]metrics.CatalogIndex)
+	for _, idx := range data.Indexes {
+		indexesByTable[idx.TableOID] = append(indexesByTable[idx.TableOID], idx)
+	}
+	indexSummary := make(map[int64]metrics.CatalogSummaryEntry)
+	for _, s := range data.Summaries {
+		if s.IndexOID > 0 && strings.Contains(s.Command, "INDEX") {
+			indexSummary[s.IndexOID] = s
+		}
+	}
+	activeIndexOIDs := make(map[int64]bool)
+	for _, p := range data.Processes {
+		if p.IndexOID > 0 {
+			activeIndexOIDs[p.IndexOID] = true
+		}
+	}
+
 	var tableRows [][]string
 	for _, r := range rows {
 		statusStyled := r.status
@@ -697,6 +718,61 @@ func renderTopTables(th *theme.Theme, sectionStyle lipgloss.Style, contentWidth,
 			r.eta,
 			statusStyled,
 		})
+
+		// Append index sub-rows for this table
+		if !data.ShowIndexes {
+			continue
+		}
+		for _, idx := range indexesByTable[r.tableOID] {
+			idxName := "  \u2514 " + idx.RelName
+			idxType := "IDX"
+			if idx.IsPrimary {
+				idxType = "PK"
+			} else if idx.IsUnique {
+				idxType = "UQ"
+			}
+
+			var idxDuration string
+			var idxStatus string
+			if s, ok := indexSummary[idx.OID]; ok {
+				if s.DoneTimeEpoch > 0 {
+					idxStatus = "done"
+					if s.Duration > 0 {
+						idxDuration = formatIndexDuration(s.Duration)
+					}
+				} else if s.StartTimeEpoch > 0 {
+					idxStatus = "creating"
+					elapsed := time.Since(time.Unix(s.StartTimeEpoch, 0))
+					idxDuration = formatIndexDuration(elapsed.Milliseconds())
+				}
+			}
+			if idxStatus == "" && activeIndexOIDs[idx.OID] {
+				idxStatus = "creating"
+			}
+			if idxStatus == "" {
+				idxStatus = "pending"
+			}
+
+			idxStatusStyled := idxStatus
+			switch idxStatus {
+			case "done":
+				idxStatusStyled = th.GreenStyle.Render(idxStatus)
+			case "creating":
+				idxStatusStyled = th.CyanStyle.Render(idxStatus)
+			case "pending":
+				idxStatusStyled = th.DimStyle.Render(idxStatus)
+			}
+
+			tableRows = append(tableRows, []string{
+				idxName,
+				th.DimStyle.Render(idxType),
+				"",
+				"",
+				"",
+				idxDuration,
+				idxStatusStyled,
+			})
+		}
 	}
 
 	visibleRows := tableHeight - 2 // header + scroll indicator
@@ -704,7 +780,17 @@ func renderTopTables(th *theme.Theme, sectionStyle lipgloss.Style, contentWidth,
 		visibleRows = 3
 	}
 
-	b.WriteString(components.RenderTable(th, cols, tableRows, data.TablesCursor, visibleRows, data.TablesSortCol, contentWidth))
+	// Count tables vs indexes for footer
+	tableCount := len(rows)
+	indexCount := len(tableRows) - tableCount
+	var footerInfo string
+	if indexCount > 0 {
+		footerInfo = fmt.Sprintf("(%d tables, %d indexes)", tableCount, indexCount)
+	} else {
+		footerInfo = fmt.Sprintf("(%d tables)", tableCount)
+	}
+
+	b.WriteString(components.RenderTable(th, cols, tableRows, data.TablesCursor, visibleRows, data.TablesSortCol, contentWidth, footerInfo))
 
 	return b.String()
 }
@@ -712,6 +798,7 @@ func renderTopTables(th *theme.Theme, sectionStyle lipgloss.Style, contentWidth,
 // --- helpers ---
 
 type tableRow struct {
+	tableOID  int64
 	name      string
 	totalSize int64
 	copied    int64
@@ -881,6 +968,14 @@ func formatDuration(d time.Duration) string {
 }
 
 func formatMillis(ms int64) string {
+	d := time.Duration(ms) * time.Millisecond
+	return formatGoDuration(d)
+}
+
+func formatIndexDuration(ms int64) string {
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
 	d := time.Duration(ms) * time.Millisecond
 	return formatGoDuration(d)
 }

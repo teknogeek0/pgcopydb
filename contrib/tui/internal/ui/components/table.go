@@ -15,7 +15,7 @@ type Column struct {
 	Align int // 0=left, 1=right
 }
 
-func RenderTable(th *theme.Theme, columns []Column, rows [][]string, cursor int, visibleRows int, sortCol int, width int) string {
+func RenderTable(th *theme.Theme, columns []Column, rows [][]string, cursor int, visibleRows int, sortCol int, width int, footerInfo string) string {
 	var b strings.Builder
 
 	header := renderRow(th, columns, nil, true, -1, sortCol)
@@ -38,8 +38,13 @@ func RenderTable(th *theme.Theme, columns []Column, rows [][]string, cursor int,
 	for i := start; i < end; i++ {
 		isSelected := i == cursor
 		row := renderRow(th, columns, rows[i], false, i, -1)
+		// Pad row to full width to ensure background styles fill the line
+		rowWidth := lipgloss.Width(row)
+		if rowWidth < width {
+			row += strings.Repeat(" ", width-rowWidth)
+		}
 		if isSelected {
-			b.WriteString(th.SelectedRowStyle.Width(width).Render(row) + "\n")
+			b.WriteString(th.SelectedRowStyle.Render(row) + "\n")
 		} else if i%2 == 0 {
 			b.WriteString(th.TableRowStyle.Render(row) + "\n")
 		} else {
@@ -48,7 +53,11 @@ func RenderTable(th *theme.Theme, columns []Column, rows [][]string, cursor int,
 	}
 
 	if len(rows) > visibleRows {
-		b.WriteString(th.DimStyle.Render(fmt.Sprintf("  %d/%d rows", cursor+1, len(rows))))
+		info := fmt.Sprintf("  %d/%d rows", cursor+1, len(rows))
+		if footerInfo != "" {
+			info += "  " + footerInfo
+		}
+		b.WriteString(th.DimStyle.Render(info))
 	}
 
 	return b.String()
@@ -67,41 +76,49 @@ func renderRow(th *theme.Theme, columns []Column, values []string, isHeader bool
 			val = values[i]
 		}
 
-		// Use ANSI-aware width for truncation
-		visWidth := lipgloss.Width(val)
-		if visWidth > col.Width {
-			// Strip any ANSI codes before truncating to avoid corrupting escape sequences
-			plain := stripAnsi(val)
-			if len(plain) > col.Width-1 {
-				val = plain[:col.Width-1] + "…"
-			}
-		}
-
 		cellWidth := col.Width
 		padding := 1
 		if i == len(columns)-1 {
 			padding = 0
 		}
 
+		// Truncate or pad val to exactly cellWidth visual characters.
+		// We do this manually instead of using lipgloss Width to avoid
+		// its word-wrapping behaviour, which breaks cells containing
+		// multi-byte characters followed by spaces (e.g. "└ name").
+		visWidth := lipgloss.Width(val)
+		if visWidth > cellWidth {
+			plain := stripAnsi(val)
+			runes := []rune(plain)
+			for len(runes) > 0 && lipgloss.Width(string(runes)) >= cellWidth {
+				runes = runes[:len(runes)-1]
+			}
+			val = string(runes) + "…"
+			visWidth = lipgloss.Width(val)
+		}
+
 		var styled string
 		if isHeader {
+			pad := ""
+			if visWidth < cellWidth {
+				pad = strings.Repeat(" ", cellWidth-visWidth)
+			}
 			styled = lipgloss.NewStyle().
-				Width(cellWidth).
-				PaddingRight(padding).
 				Bold(true).
 				Foreground(th.FgPrimary).
-				Render(val)
+				Render(val+pad) + strings.Repeat(" ", padding)
 		} else if col.Align == 1 {
-			styled = lipgloss.NewStyle().
-				Width(cellWidth).
-				PaddingRight(padding).
-				Align(lipgloss.Right).
-				Render(val)
+			pad := ""
+			if visWidth < cellWidth {
+				pad = strings.Repeat(" ", cellWidth-visWidth)
+			}
+			styled = pad + val + strings.Repeat(" ", padding)
 		} else {
-			styled = lipgloss.NewStyle().
-				Width(cellWidth).
-				PaddingRight(padding).
-				Render(val)
+			pad := ""
+			if visWidth < cellWidth {
+				pad = strings.Repeat(" ", cellWidth-visWidth)
+			}
+			styled = val + pad + strings.Repeat(" ", padding)
 		}
 		parts = append(parts, styled)
 	}

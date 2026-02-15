@@ -49,6 +49,7 @@ type Model struct {
 	catalogSetup     *metrics.CatalogSetup
 	catalogSections  []metrics.CatalogSection
 	catalogTables    []metrics.CatalogTable
+	catalogIndexes   []metrics.CatalogIndex
 	catalogSummaries []metrics.CatalogSummaryEntry
 	catalogTimings   []metrics.CatalogTiming
 	catalogSentinel  *metrics.CatalogSentinel
@@ -91,6 +92,7 @@ type Model struct {
 	tablesSortCol int
 	sourceCursor  int
 	showHelp      bool
+	showIndexes   bool
 	filterMode    bool
 	filterText    string
 	lastErr       error
@@ -116,6 +118,7 @@ func NewModel(
 		targetPG:        targetPG,
 		replicaPGs:      replicaPGs,
 		sysProvider:     sysProv,
+		showIndexes:     true,
 		tpsDelta:        metrics.NewDeltaCalculator(),
 		netDelta:        metrics.NewDeltaCalculator(),
 		walDelta:        metrics.NewDeltaCalculator(),

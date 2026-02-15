@@ -35,6 +35,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.catalogSetup = msg.Setup
 			m.catalogSections = msg.Sections
 			m.catalogTables = msg.Tables
+			m.catalogIndexes = msg.Indexes
 			m.catalogSummaries = msg.Summaries
 			m.catalogTimings = msg.Timings
 			m.catalogSentinel = msg.Sentinel
@@ -143,6 +144,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (*Model, tea.Cmd) {
 		m.cycleSort()
 		return m, nil
 
+	case key.Matches(msg, Keys.ToggleIdx):
+		m.showIndexes = !m.showIndexes
+		// Reset cursor to avoid out-of-bounds after hiding indexes
+		m.tablesCursor = 0
+		return m, nil
+
 	case key.Matches(msg, Keys.Filter):
 		m.filterMode = true
 		m.filterText = ""
@@ -187,7 +194,7 @@ func (m *Model) tickFetch() tea.Cmd {
 
 // scrollDown always scrolls the Top Tables cursor.
 func (m *Model) scrollDown() {
-	max := len(m.filteredTables()) - 1
+	max := m.filteredRowCount() - 1
 	if m.tablesCursor < max {
 		m.tablesCursor++
 	}
@@ -205,7 +212,7 @@ func (m *Model) scrollToTop() {
 }
 
 func (m *Model) scrollToBottom() {
-	if n := len(m.filteredTables()); n > 0 {
+	if n := m.filteredRowCount(); n > 0 {
 		m.tablesCursor = n - 1
 	}
 }
@@ -213,6 +220,26 @@ func (m *Model) scrollToBottom() {
 // cycleSort always cycles the Top Tables sort column.
 func (m *Model) cycleSort() {
 	m.tablesSortCol = (m.tablesSortCol + 1) % 6
+}
+
+// filteredRowCount returns the total number of displayed rows (tables + index sub-rows).
+func (m *Model) filteredRowCount() int {
+	tables := m.filteredTables()
+	count := 0
+	for _, t := range tables {
+		if t.ExcludeData {
+			continue
+		}
+		count++ // the table row itself
+		if m.showIndexes {
+			for _, idx := range m.catalogIndexes {
+				if idx.TableOID == t.OID {
+					count++
+				}
+			}
+		}
+	}
+	return count
 }
 
 func (m *Model) filteredTables() []metrics.CatalogTable {

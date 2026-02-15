@@ -48,6 +48,12 @@ func fetchCatalogData(provider *catalog.Provider) tea.Cmd {
 			return msg
 		}
 
+		msg.Indexes, err = provider.Indexes(ctx)
+		if err != nil {
+			msg.Err = err
+			return msg
+		}
+
 		msg.Summaries, err = provider.Summaries(ctx)
 		if err != nil {
 			msg.Err = err
