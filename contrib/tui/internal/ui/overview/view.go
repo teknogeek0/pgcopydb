@@ -33,16 +33,17 @@ func Render(th *theme.Theme, width, height int, data Data) string {
 	b.WriteString(th.SectionTitleStyle.Render("  Migration Progress") + "\n")
 	b.WriteString(renderChecklist(th, data.Timings, data.Processes) + "\n")
 
-	// Overall progress bar
-	totalBytes, copiedBytes := computeProgress(data.Tables, data.Summaries)
-	b.WriteString(components.RenderProgressBar(th, "Data", copiedBytes, totalBytes, contentWidth) + "\n")
+	// Overall progress bar — use table count (bytes mismatch: pg_table_size includes
+	// TOAST/FSM/VM overhead but COPY only transfers raw tuples)
+	totalTables := countDataTables(data.Tables)
+	doneTables := countDoneTables(data.Tables, data.Summaries)
+	b.WriteString(components.RenderProgressBar(th, "Data", int64(doneTables), int64(totalTables), contentWidth) + "\n")
 
-	// Data transferred + ETA
-	b.WriteString(renderDataSummary(th, totalBytes, copiedBytes, data.Summaries) + "\n")
+	// Data transferred
+	copiedBytes := sumCopyBytes(data.Summaries)
+	b.WriteString(renderDataSummary(th, data.Timings, copiedBytes, data.Summaries) + "\n")
 
 	// Table count summary
-	totalTables := len(data.Tables)
-	doneTables := countDoneTables(data.Tables, data.Summaries)
 	b.WriteString(fmt.Sprintf("  %s %d/%d tables completed\n",
 		th.DimStyle.Render("Tables:"),
 		doneTables, totalTables,
@@ -90,7 +91,7 @@ func renderChecklist(th *theme.Theme, timings []metrics.CatalogTiming, processes
 			if t.DurationPretty != "" {
 				duration = t.DurationPretty
 			} else if t.Duration > 0 {
-				duration = formatSeconds(t.Duration)
+				duration = formatMillis(t.Duration)
 			}
 		} else if t.StartTimeEpoch > 0 {
 			status = components.StatusActive
@@ -126,20 +127,24 @@ func renderChecklist(th *theme.Theme, timings []metrics.CatalogTiming, processes
 	return components.RenderChecklist(th, items)
 }
 
-func computeProgress(tables []metrics.CatalogTable, summaries []metrics.CatalogSummaryEntry) (total, copied int64) {
+func countDataTables(tables []metrics.CatalogTable) int {
+	n := 0
 	for _, t := range tables {
 		if !t.ExcludeData {
-			total += t.Bytes
+			n++
 		}
 	}
+	return n
+}
 
+func sumCopyBytes(summaries []metrics.CatalogSummaryEntry) int64 {
+	var total int64
 	for _, s := range summaries {
 		if s.Bytes > 0 && strings.HasPrefix(s.Command, "COPY") {
-			copied += s.Bytes
+			total += s.Bytes
 		}
 	}
-
-	return total, copied
+	return total
 }
 
 func countDoneTables(tables []metrics.CatalogTable, summaries []metrics.CatalogSummaryEntry) int {
@@ -152,39 +157,30 @@ func countDoneTables(tables []metrics.CatalogTable, summaries []metrics.CatalogS
 	return len(done)
 }
 
-func renderDataSummary(th *theme.Theme, total, copied int64, summaries []metrics.CatalogSummaryEntry) string {
-	totalStr := metrics.FormatBytes(uint64(total))
+func renderDataSummary(th *theme.Theme, timings []metrics.CatalogTiming, copied int64, summaries []metrics.CatalogSummaryEntry) string {
 	copiedStr := metrics.FormatBytes(uint64(copied))
 
-	// Compute average speed from summaries
-	var totalDuration int64
-	for _, s := range summaries {
-		if strings.HasPrefix(s.Command, "COPY") && s.Duration > 0 {
-			totalDuration += s.Duration
+	// Get wall clock duration for COPY phase (duration is in milliseconds)
+	var wallClockMs int64
+	for _, t := range timings {
+		if t.Label == "COPY, INDEX, CONSTRAINTS, VACUUM (wall clock)" && t.Duration > 0 {
+			wallClockMs = t.Duration
+			break
 		}
 	}
 
-	summary := fmt.Sprintf("  %s %s / %s",
-		th.DimStyle.Render("Copied:"),
+	summary := fmt.Sprintf("  %s %s",
+		th.DimStyle.Render("Transferred:"),
 		th.BrightStyle.Render(copiedStr),
-		totalStr,
 	)
 
-	if totalDuration > 0 && copied > 0 {
-		rate := float64(copied) / float64(totalDuration)
+	if wallClockMs > 0 && copied > 0 {
+		wallClockSec := float64(wallClockMs) / 1000.0
+		rate := float64(copied) / wallClockSec
 		summary += fmt.Sprintf("  %s %s",
 			th.DimStyle.Render("Speed:"),
 			metrics.FormatBytesRate(rate),
 		)
-
-		remaining := total - copied
-		if remaining > 0 && rate > 0 {
-			eta := time.Duration(float64(remaining)/rate) * time.Second
-			summary += fmt.Sprintf("  %s %s",
-				th.DimStyle.Render("ETA:"),
-				formatGoDuration(eta),
-			)
-		}
 	}
 
 	return summary
@@ -222,8 +218,8 @@ func renderSetup(th *theme.Theme, s *metrics.CatalogSetup) string {
 	return b.String()
 }
 
-func formatSeconds(s int64) string {
-	d := time.Duration(s) * time.Second
+func formatMillis(ms int64) string {
+	d := time.Duration(ms) * time.Millisecond
 	return formatGoDuration(d)
 }
 

@@ -10,51 +10,32 @@ import (
 	"github.com/dimitri/pgcopydb/contrib/tui/internal/theme"
 )
 
-func RenderHeader(th *theme.Theme, width int, version, sourceHost, targetHost, runtime string) string {
+func RenderHeader(th *theme.Theme, width int, runtime string) string {
 	clock := time.Now().Format("15:04:05")
 
-	left := th.HeaderStyle.Render("pgcopydb-tui") +
-		th.HeaderDimStyle.Render(" │ ") +
-		th.HeaderDimStyle.Render(fmt.Sprintf("v%s", version))
+	// Build header text without per-segment padding to avoid width overflow
+	titleStyle := lipgloss.NewStyle().
+		Foreground(th.HeaderStyle.GetForeground()).
+		Bold(true)
+	dimStyle := lipgloss.NewStyle().
+		Foreground(th.HeaderDimStyle.GetForeground())
 
-	mid := th.HeaderDimStyle.Render("src: ") +
-		th.HeaderStyle.Render(truncate(sourceHost, 25)) +
-		th.HeaderDimStyle.Render(" → tgt: ") +
-		th.HeaderStyle.Render(truncate(targetHost, 25)) +
-		th.HeaderDimStyle.Render(" │ ") +
-		th.HeaderDimStyle.Render(runtime)
+	left := " " + titleStyle.Render("pgcopydb Migration Monitor") +
+		dimStyle.Render(" — "+clock)
 
-	right := th.HeaderDimStyle.Render(clock)
+	right := dimStyle.Render(fmt.Sprintf("Runtime: %s ", runtime))
 
 	leftW := lipgloss.Width(left)
-	midW := lipgloss.Width(mid)
 	rightW := lipgloss.Width(right)
-	totalContent := leftW + midW + rightW
-
-	var header string
-	if totalContent+4 > width {
-		header = left + "  " + right
-	} else {
-		gap1 := (width - totalContent) / 2
-		gap2 := width - leftW - midW - rightW - gap1
-		if gap1 < 2 {
-			gap1 = 2
-		}
-		if gap2 < 2 {
-			gap2 = 2
-		}
-		header = left + strings.Repeat(" ", gap1) + mid + strings.Repeat(" ", gap2) + right
+	gap := width - leftW - rightW
+	if gap < 1 {
+		gap = 1
 	}
+
+	header := left + strings.Repeat(" ", gap) + right
 
 	return lipgloss.NewStyle().
 		Background(th.BgSecondary).
 		Width(width).
 		Render(header)
-}
-
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "..."
 }

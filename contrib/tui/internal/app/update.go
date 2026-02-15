@@ -55,11 +55,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sourceWALLSN = msg.WALLSN
 			m.sourceActivity = msg.Activity
 
-			// Track WAL write rate
+			// Compute TPS (called once per fetch, so DeltaCalculator works correctly)
+			var tps float64
+			for _, db := range msg.Databases {
+				tps += m.tpsDelta.Rate("src_tps_"+db.DatName, db.TotalXacts)
+			}
+			m.sourceTPS = tps
+
+			// Compute WAL write rate
 			if msg.WALLSN != "" {
 				lsn, err := metrics.ParseLSN(msg.WALLSN)
 				if err == nil {
-					m.walDelta.Rate("wal_lsn", int64(lsn))
+					m.walRate = m.walDelta.Rate("wal_lsn", int64(lsn))
 				}
 			}
 		}
@@ -74,6 +81,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.targetDBS = msg.Databases
 			m.targetConns = msg.Conns
 			m.targetActivity = msg.Activity
+
+			// Compute TPS
+			var tps float64
+			for _, db := range msg.Databases {
+				tps += m.tpsDelta.Rate("tgt_tps_"+db.DatName, db.TotalXacts)
+			}
+			m.targetTPS = tps
 		}
 		return m, nil
 
@@ -82,6 +96,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastErr = msg.Err
 		} else if msg.Stats != nil {
 			m.sysStats = msg.Stats
+
+			// Compute network rates
+			m.netRxRate = m.netDelta.Rate("net_rx", int64(msg.Stats.NetRxBytes))
+			m.netTxRate = m.netDelta.Rate("net_tx", int64(msg.Stats.NetTxBytes))
 		}
 		return m, nil
 	}
@@ -98,28 +116,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (*Model, tea.Cmd) {
 		m.showHelp = !m.showHelp
 		return m, nil
 
-	case key.Matches(msg, Keys.NextTab):
-		m.activeTab = (m.activeTab + 1) % TabCount
-		return m, m.fetchActiveTabPG()
-
-	case key.Matches(msg, Keys.PrevTab):
-		m.activeTab = (m.activeTab - 1 + TabCount) % TabCount
-		return m, m.fetchActiveTabPG()
-
-	case key.Matches(msg, Keys.Tab1):
-		m.activeTab = TabOverview
-		return m, m.fetchActiveTabPG()
-	case key.Matches(msg, Keys.Tab2):
-		m.activeTab = TabSource
-		return m, m.fetchActiveTabPG()
-	case key.Matches(msg, Keys.Tab3):
-		m.activeTab = TabTarget
-		return m, m.fetchActiveTabPG()
-	case key.Matches(msg, Keys.Tab4):
-		m.activeTab = TabTables
-		return m, nil
-	case key.Matches(msg, Keys.Tab5):
-		m.activeTab = TabSystem
+	// Tab keys are no-ops in single-page mode (kept for future use)
+	case key.Matches(msg, Keys.NextTab),
+		key.Matches(msg, Keys.PrevTab),
+		key.Matches(msg, Keys.Tab1),
+		key.Matches(msg, Keys.Tab2),
+		key.Matches(msg, Keys.Tab3),
+		key.Matches(msg, Keys.Tab4),
+		key.Matches(msg, Keys.Tab5):
 		return m, nil
 
 	case key.Matches(msg, Keys.Down):
@@ -175,70 +179,40 @@ func (m *Model) tickFetch() tea.Cmd {
 		tickCmd(time.Duration(m.cfg.Interval) * time.Second),
 		fetchCatalogData(m.catalogProvider),
 		fetchSystemStatsCmd(m.sysProvider),
+		fetchSourcePG(m.sourcePG),
+		fetchTargetPG(m.targetPG),
 	}
-
-	pgCmd := m.fetchActiveTabPG()
-	if pgCmd != nil {
-		cmds = append(cmds, pgCmd)
-	}
-
 	return tea.Batch(cmds...)
 }
 
+// scrollDown always scrolls the Top Tables cursor.
 func (m *Model) scrollDown() {
-	switch m.activeTab {
-	case TabTables:
-		max := len(m.filteredTables()) - 1
-		if m.tablesCursor < max {
-			m.tablesCursor++
-		}
-	case TabSource:
-		max := len(m.sourceActivity) - 1
-		if m.sourceCursor < max {
-			m.sourceCursor++
-		}
+	max := len(m.filteredTables()) - 1
+	if m.tablesCursor < max {
+		m.tablesCursor++
 	}
 }
 
+// scrollUp always scrolls the Top Tables cursor.
 func (m *Model) scrollUp() {
-	switch m.activeTab {
-	case TabTables:
-		if m.tablesCursor > 0 {
-			m.tablesCursor--
-		}
-	case TabSource:
-		if m.sourceCursor > 0 {
-			m.sourceCursor--
-		}
+	if m.tablesCursor > 0 {
+		m.tablesCursor--
 	}
 }
 
 func (m *Model) scrollToTop() {
-	switch m.activeTab {
-	case TabTables:
-		m.tablesCursor = 0
-	case TabSource:
-		m.sourceCursor = 0
-	}
+	m.tablesCursor = 0
 }
 
 func (m *Model) scrollToBottom() {
-	switch m.activeTab {
-	case TabTables:
-		if n := len(m.filteredTables()); n > 0 {
-			m.tablesCursor = n - 1
-		}
-	case TabSource:
-		if n := len(m.sourceActivity); n > 0 {
-			m.sourceCursor = n - 1
-		}
+	if n := len(m.filteredTables()); n > 0 {
+		m.tablesCursor = n - 1
 	}
 }
 
+// cycleSort always cycles the Top Tables sort column.
 func (m *Model) cycleSort() {
-	if m.activeTab == TabTables {
-		m.tablesSortCol = (m.tablesSortCol + 1) % 6
-	}
+	m.tablesSortCol = (m.tablesSortCol + 1) % 6
 }
 
 func (m *Model) filteredTables() []metrics.CatalogTable {
@@ -255,7 +229,3 @@ func (m *Model) filteredTables() []metrics.CatalogTable {
 	return result
 }
 
-// WALWriteRate returns the current WAL write rate in bytes per second.
-func (m *Model) WALWriteRate() float64 {
-	return m.walDelta.RateFloat64("wal_rate", 0)
-}

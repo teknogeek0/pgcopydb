@@ -74,10 +74,17 @@ type Model struct {
 	// System data
 	sysStats *metrics.SystemStats
 
-	// Deltas
-	tpsDelta    *metrics.DeltaCalculator
-	netDelta    *metrics.DeltaCalculator
-	walDelta    *metrics.DeltaCalculator
+	// Deltas (internal, used only in Update)
+	tpsDelta *metrics.DeltaCalculator
+	netDelta *metrics.DeltaCalculator
+	walDelta *metrics.DeltaCalculator
+
+	// Computed rates (set in Update, read in View)
+	sourceTPS float64
+	targetTPS float64
+	netRxRate float64
+	netTxRate float64
+	walRate   float64
 
 	// UI state
 	tablesCursor  int
@@ -120,23 +127,10 @@ func (m *Model) Init() tea.Cmd {
 	return tea.Batch(
 		fetchCatalogData(m.catalogProvider),
 		fetchSystemStatsCmd(m.sysProvider),
-		m.fetchActiveTabPG(),
+		fetchSourcePG(m.sourcePG),
+		fetchTargetPG(m.targetPG),
 		tickCmd(time.Duration(m.cfg.Interval)*time.Second),
 	)
-}
-
-func (m *Model) fetchActiveTabPG() tea.Cmd {
-	switch m.activeTab {
-	case TabSource:
-		return fetchSourcePG(m.sourcePG)
-	case TabTarget:
-		return fetchTargetPG(m.targetPG)
-	case TabOverview:
-		// Overview needs both source and target for context
-		return tea.Batch(fetchSourcePG(m.sourcePG), fetchTargetPG(m.targetPG))
-	default:
-		return nil
-	}
 }
 
 func (m *Model) Cleanup() {

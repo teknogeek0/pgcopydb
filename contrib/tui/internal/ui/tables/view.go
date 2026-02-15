@@ -56,19 +56,24 @@ func Render(th *theme.Theme, width, height int, data Data) string {
 
 		if s, ok := summaryByOID[t.OID]; ok {
 			row.copied = s.Bytes
-			if t.Bytes > 0 {
-				row.pct = float64(s.Bytes) / float64(t.Bytes) * 100
-			}
-			if s.Duration > 0 {
-				row.speed = float64(s.Bytes) / float64(s.Duration)
+			// duration is in milliseconds
+			durationSec := float64(s.Duration) / 1000.0
+			if durationSec > 0 {
+				row.speed = float64(s.Bytes) / durationSec
 			}
 
 			if s.DoneTimeEpoch > 0 {
 				row.status = "done"
-				dur := time.Duration(s.Duration) * time.Second
-				row.eta = formatDuration(dur)
+				row.pct = 100.0
+				row.eta = formatDuration(time.Duration(s.Duration) * time.Millisecond)
 			} else if s.StartTimeEpoch > 0 {
 				row.status = "copying"
+				if t.Bytes > 0 {
+					row.pct = float64(s.Bytes) / float64(t.Bytes) * 100
+					if row.pct > 100 {
+						row.pct = 99.9
+					}
+				}
 				remaining := t.Bytes - s.Bytes
 				if row.speed > 0 && remaining > 0 {
 					eta := time.Duration(float64(remaining)/row.speed) * time.Second

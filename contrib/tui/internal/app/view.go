@@ -8,11 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/dimitri/pgcopydb/contrib/tui/internal/ui"
-	"github.com/dimitri/pgcopydb/contrib/tui/internal/ui/overview"
-	"github.com/dimitri/pgcopydb/contrib/tui/internal/ui/source"
-	"github.com/dimitri/pgcopydb/contrib/tui/internal/ui/system"
-	"github.com/dimitri/pgcopydb/contrib/tui/internal/ui/tables"
-	"github.com/dimitri/pgcopydb/contrib/tui/internal/ui/target"
+	"github.com/dimitri/pgcopydb/contrib/tui/internal/ui/dashboard"
 )
 
 func (m *Model) View() string {
@@ -21,30 +17,69 @@ func (m *Model) View() string {
 	}
 
 	// Header
-	sourceHost := extractHost(m.cfg.SourceURI)
-	targetHost := extractHost(m.cfg.TargetURI)
 	runtime := formatDuration(time.Since(m.startTime))
-	header := ui.RenderHeader(m.theme, m.width, m.version, sourceHost, targetHost, runtime)
+	header := ui.RenderHeader(m.theme, m.width, runtime)
 
-	// Tabs
-	tabBar := ui.RenderTabs(m.theme, m.width, TabNames[:], m.activeTab)
-
-	// Content
-	contentHeight := m.height - 4 // header(1) + tabs(1) + statusbar(1) + filter(1 if active)
+	// Content — single dashboard page
+	contentHeight := m.height - 2 // header + statusbar only
 	if m.filterMode {
 		contentHeight--
 	}
 	if contentHeight < 1 {
 		contentHeight = 1
 	}
-	content := m.renderContent(contentHeight)
+
+	content := dashboard.Render(m.theme, m.width, contentHeight, dashboard.Data{
+		// Catalog
+		Setup:     m.catalogSetup,
+		Sections:  m.catalogSections,
+		Tables:    m.catalogTables,
+		Summaries: m.catalogSummaries,
+		Timings:   m.catalogTimings,
+		Sentinel:  m.catalogSentinel,
+		Processes: m.catalogProcesses,
+
+		// Source PG
+		SourceVersion:  m.sourceVersion,
+		SourceUptime:   m.sourceUptime,
+		SourceDBS:      m.sourceDBS,
+		SourceConns:    m.sourceConns,
+		SourceSlots:    m.sourceSlots,
+		SourceRepls:    m.sourceRepls,
+		SourceWALLSN:   m.sourceWALLSN,
+		SourceActivity: m.sourceActivity,
+
+		// Target PG
+		TargetVersion:  m.targetVersion,
+		TargetUptime:   m.targetUptime,
+		TargetDBS:      m.targetDBS,
+		TargetConns:    m.targetConns,
+		TargetActivity: m.targetActivity,
+
+		// System
+		SysStats: m.sysStats,
+
+		// Computed rates
+		SourceTPS: m.sourceTPS,
+		TargetTPS: m.targetTPS,
+		NetRxRate: m.netRxRate,
+		NetTxRate: m.netTxRate,
+		WalRate:   m.walRate,
+
+		// UI state
+		TablesCursor:  m.tablesCursor,
+		TablesSortCol: m.tablesSortCol,
+		FilterText:    m.filterText,
+	})
 
 	// Filter bar
 	var filterBar string
 	if m.filterMode {
-		filterBar = m.theme.StatusBarStyle.Width(m.width).Render(
-			fmt.Sprintf(" / %s█", m.filterText),
-		)
+		filterBar = lipgloss.NewStyle().
+			Foreground(m.theme.StatusBarStyle.GetForeground()).
+			Background(m.theme.StatusBarStyle.GetBackground()).
+			Width(m.width).
+			Render(fmt.Sprintf(" / %s█", m.filterText))
 	}
 
 	// Status bar
@@ -55,7 +90,7 @@ func (m *Model) View() string {
 		return m.renderHelp()
 	}
 
-	parts := []string{header, tabBar, content}
+	parts := []string{header, content}
 	if filterBar != "" {
 		parts = append(parts, filterBar)
 	}
@@ -64,97 +99,57 @@ func (m *Model) View() string {
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
-func (m *Model) renderContent(height int) string {
-	var content string
-
-	switch m.activeTab {
-	case TabOverview:
-		content = overview.Render(m.theme, m.width, height, overview.Data{
-			Setup:     m.catalogSetup,
-			Sections:  m.catalogSections,
-			Tables:    m.catalogTables,
-			Summaries: m.catalogSummaries,
-			Timings:   m.catalogTimings,
-			Sentinel:  m.catalogSentinel,
-			Processes: m.catalogProcesses,
-		})
-	case TabSource:
-		content = source.Render(m.theme, m.width, height, source.Data{
-			Version:   m.sourceVersion,
-			Uptime:    m.sourceUptime,
-			Databases: m.sourceDBS,
-			Conns:     m.sourceConns,
-			Slots:     m.sourceSlots,
-			ReplStats: m.sourceRepls,
-			WALLSN:    m.sourceWALLSN,
-			Activity:  m.sourceActivity,
-			TpsDelta:  m.tpsDelta,
-			WalDelta:  m.walDelta,
-			Cursor:    m.sourceCursor,
-		})
-	case TabTarget:
-		content = target.Render(m.theme, m.width, height, target.Data{
-			Version:       m.targetVersion,
-			Uptime:        m.targetUptime,
-			Databases:     m.targetDBS,
-			Conns:         m.targetConns,
-			Activity:      m.targetActivity,
-			TpsDelta:      m.tpsDelta,
-			CatalogTables: m.catalogTables,
-			Summaries:     m.catalogSummaries,
-		})
-	case TabTables:
-		content = tables.Render(m.theme, m.width, height, tables.Data{
-			Tables:    m.filteredTables(),
-			Summaries: m.catalogSummaries,
-			Processes: m.catalogProcesses,
-			Cursor:    m.tablesCursor,
-			SortCol:   m.tablesSortCol,
-		})
-	case TabSystem:
-		content = system.Render(m.theme, m.width, height, m.sysStats, m.netDelta)
-	}
-
-	// Pad content to fill height
-	lines := strings.Count(content, "\n") + 1
-	if lines < height {
-		content += strings.Repeat("\n", height-lines)
-	}
-
-	return content
+// renderTabContent is kept for future tab restoration.
+func (m *Model) renderTabContent(height int) string {
+	// Placeholder for future tab-based rendering.
+	return ""
 }
 
 func (m *Model) renderStatusBar() string {
-	left := m.theme.DimStyle.Render(" tab/1-5:switch  j/k:scroll  s:sort  /:filter  ?:help  q:quit")
+	left := " j/k:scroll s:sort /:filter ?:help q:quit"
 
 	var right string
 	if m.lastErr != nil {
-		right = m.theme.ErrorStyle.Render(fmt.Sprintf("ERR: %v ", m.lastErr))
+		right = fmt.Sprintf("ERR: %v ", m.lastErr)
 	} else {
 		var connected []string
 		if m.catalogProvider != nil {
-			connected = append(connected, "catalog")
+			connected = append(connected, "cat")
 		}
 		if m.sourcePG != nil {
-			connected = append(connected, "source")
+			connected = append(connected, "src")
 		}
 		if m.targetPG != nil {
-			connected = append(connected, "target")
+			connected = append(connected, "tgt")
 		}
 		if len(connected) > 0 {
-			right = m.theme.ConnectedStyle.Render(fmt.Sprintf("● %s ", strings.Join(connected, ", ")))
+			right = fmt.Sprintf("● %s ", strings.Join(connected, ","))
 		}
 	}
 
-	leftW := lipgloss.Width(left)
-	rightW := lipgloss.Width(right)
+	// Build the bar content within the available inner width
+	leftStyled := m.theme.DimStyle.Render(left)
+	var rightStyled string
+	if m.lastErr != nil {
+		rightStyled = m.theme.ErrorStyle.Render(right)
+	} else if right != "" {
+		rightStyled = m.theme.ConnectedStyle.Render(right)
+	}
+
+	leftW := lipgloss.Width(leftStyled)
+	rightW := lipgloss.Width(rightStyled)
 	gap := m.width - leftW - rightW
 	if gap < 0 {
 		gap = 0
 	}
 
-	bar := left + strings.Repeat(" ", gap) + right
-	return m.theme.StatusBarStyle.Width(m.width).Render(bar)
+	bar := leftStyled + strings.Repeat(" ", gap) + rightStyled
+	// StatusBarStyle has Padding(0,1) adding 2 chars; use inline style to avoid wrapping
+	return lipgloss.NewStyle().
+		Foreground(m.theme.StatusBarStyle.GetForeground()).
+		Background(m.theme.StatusBarStyle.GetBackground()).
+		Width(m.width).
+		Render(bar)
 }
 
 func (m *Model) renderHelp() string {
@@ -162,9 +157,7 @@ func (m *Model) renderHelp() string {
   pgcopydb-tui — Migration Monitor
 
   Navigation
-    tab / shift+tab    Next / previous tab
-    1-5                Jump to tab
-    j/k or arrows      Scroll up/down
+    j/k or arrows      Scroll up/down (Top Tables)
     g/G                Jump to top/bottom
 
   Actions
@@ -190,7 +183,6 @@ func extractHost(uri string) string {
 	if uri == "" {
 		return "N/A"
 	}
-	// Simple extraction: find @host:port/ or @host/
 	at := strings.Index(uri, "@")
 	if at == -1 {
 		return uri

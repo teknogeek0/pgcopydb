@@ -67,28 +67,62 @@ func renderRow(th *theme.Theme, columns []Column, values []string, isHeader bool
 			val = values[i]
 		}
 
-		if len(val) > col.Width {
-			val = val[:col.Width-1] + "…"
+		// Use ANSI-aware width for truncation
+		visWidth := lipgloss.Width(val)
+		if visWidth > col.Width {
+			// Strip any ANSI codes before truncating to avoid corrupting escape sequences
+			plain := stripAnsi(val)
+			if len(plain) > col.Width-1 {
+				val = plain[:col.Width-1] + "…"
+			}
+		}
+
+		cellWidth := col.Width
+		padding := 1
+		if i == len(columns)-1 {
+			padding = 0
 		}
 
 		var styled string
 		if isHeader {
 			styled = lipgloss.NewStyle().
-				Width(col.Width).
+				Width(cellWidth).
+				PaddingRight(padding).
 				Bold(true).
 				Foreground(th.FgPrimary).
 				Render(val)
 		} else if col.Align == 1 {
 			styled = lipgloss.NewStyle().
-				Width(col.Width).
+				Width(cellWidth).
+				PaddingRight(padding).
 				Align(lipgloss.Right).
 				Render(val)
 		} else {
 			styled = lipgloss.NewStyle().
-				Width(col.Width).
+				Width(cellWidth).
+				PaddingRight(padding).
 				Render(val)
 		}
 		parts = append(parts, styled)
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+}
+
+func stripAnsi(s string) string {
+	var result []byte
+	inEscape := false
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\x1b' {
+			inEscape = true
+			continue
+		}
+		if inEscape {
+			if (s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') {
+				inEscape = false
+			}
+			continue
+		}
+		result = append(result, s[i])
+	}
+	return string(result)
 }
