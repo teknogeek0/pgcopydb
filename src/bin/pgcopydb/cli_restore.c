@@ -40,6 +40,7 @@ static CommandLine restore_schema_command =
 		"  --target             Postgres URI to the target database\n"
 		"  --dir                Work directory to use\n"
 		"  --restore-jobs       Number of concurrent jobs for pg_restore\n"
+		"  --restore-tolerance  Max pg_restore errors to tolerate (default 10)\n"
 		"  --drop-if-exists     On the target database, clean-up from a previous run first\n"
 		"  --no-owner           Do not set ownership of objects to match the original database\n"
 		"  --no-acl             Prevent restoration of access privileges (grant/revoke commands).\n"
@@ -61,6 +62,7 @@ static CommandLine restore_schema_pre_data_command =
 		"  --target             Postgres URI to the target database\n"
 		"  --dir                Work directory to use\n"
 		"  --restore-jobs       Number of concurrent jobs for pg_restore\n"
+		"  --restore-tolerance  Max pg_restore errors to tolerate (default 10)\n"
 		"  --drop-if-exists     On the target database, clean-up from a previous run first\n"
 		"  --no-owner           Do not set ownership of objects to match the original database\n"
 		"  --no-acl             Prevent restoration of access privileges (grant/revoke commands).\n"
@@ -86,6 +88,7 @@ static CommandLine restore_schema_post_data_command =
 		"  --target             Postgres URI to the target database\n"
 		"  --dir                Work directory to use\n"
 		"  --restore-jobs       Number of concurrent jobs for pg_restore\n"
+		"  --restore-tolerance  Max pg_restore errors to tolerate (default 10)\n"
 		"  --no-owner           Do not set ownership of objects to match the original database\n"
 		"  --no-acl             Prevent restoration of access privileges (grant/revoke commands).\n"
 		"  --no-comments        Do not output commands to restore comments\n"
@@ -109,7 +112,8 @@ static CommandLine restore_roles_command =
 		"  --source             Postgres URI to the source database\n"
 		"  --target             Postgres URI to the target database\n"
 		"  --dir                Work directory to use\n"
-		"  --restore-jobs       Number of concurrent jobs for pg_restore\n",
+		"  --restore-jobs       Number of concurrent jobs for pg_restore\n"
+		"  --restore-tolerance  Max pg_restore errors to tolerate (default 10)\n",
 		cli_restore_schema_getopts,
 		cli_restore_roles);
 
