@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.pg
+      args:
+        PGVERSION: ${PGVERSION:-16}
     expose:
       - 5432
     environment:
@@ -27,6 +29,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        PGCOPYDB_IMAGE: pgcopydb:pg${PGVERSION:-16}
     environment:
       PGCOPYDB_SOURCE_PGURI: postgres://postgres:h4ckm3@source/postgres
       PGCOPYDB_TARGET_PGURI: postgres://postgres:h4ckm3@target/postgres
