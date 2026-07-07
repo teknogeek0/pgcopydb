@@ -139,11 +139,13 @@ jobs:
           - filtering
           - filtering-standby
           - extensions
+          - exclude-extension
           # - timescaledb  # temporarily disabled: failing due to an upstream timescaledb issue
           - skip-publications
           - skip-vacuum
           - skip-large-objects
           - cdc-low-level
+          - cdc-message-handling
           - cdc-test-decoding
           - cdc-endpos-between-transaction
           - cdc-filtering
