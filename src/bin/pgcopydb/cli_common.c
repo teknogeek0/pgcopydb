@@ -1220,6 +1220,30 @@ cli_copy_db_getopts(int argc, char **argv)
 		exit(EXIT_CODE_INTERNAL_ERROR);
 	}
 
+	if (options.copyGroups > 1)
+	{
+		if (!options.follow)
+		{
+			log_fatal("Option --copy-groups greater than 1 is only supported "
+					  "with clone --follow");
+			exit(EXIT_CODE_BAD_ARGS);
+		}
+
+		if (options.notConsistent)
+		{
+			log_fatal("Options --copy-groups greater than 1 and --not-consistent "
+					  "cannot be used together");
+			exit(EXIT_CODE_BAD_ARGS);
+		}
+
+		if (options.resume)
+		{
+			log_fatal("Option --resume is not supported with --copy-groups "
+					  "greater than 1");
+			exit(EXIT_CODE_BAD_ARGS);
+		}
+	}
+
 	if (!cli_copydb_is_consistent(&options))
 	{
 		log_fatal("Option --resume requires option --not-consistent");
