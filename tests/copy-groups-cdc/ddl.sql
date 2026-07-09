@@ -31,4 +31,16 @@ create table orders
 
 create index orders_customer_id_idx on orders(customer_id);
 
+create table scratch
+(
+    id      bigint generated always as identity primary key,
+    payload text not null
+);
+
+create table "orders""quoted"
+(
+    id      bigint primary key,
+    payload text not null
+);
+
 commit;

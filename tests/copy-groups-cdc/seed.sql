@@ -20,4 +20,11 @@ select 1 + (random() * 49)::int,
        repeat('o', 400)
   from generate_series(1, 600000) as g;
 
+insert into scratch(payload)
+select 'initial scratch ' || g
+  from generate_series(1, 20) as g;
+
+insert into "orders""quoted"(id, payload)
+values (1, 'initial quoted table');
+
 commit;
