@@ -3618,9 +3618,9 @@ catalog_lookup_s_table_group_number_fetch(SQLiteQuery *query)
 /*
  * catalog_lookup_s_table_group_number returns the copy group a table is
  * assigned to in the s_table_group_assignment companion table (see
- * catalog_compute_table_group_assignment). A table that has no row (which only
- * happens when no assignment was computed, e.g. at the single-group default)
- * is reported as group 0.
+ * catalog_compute_table_group_assignment). The assignment table is populated for
+ * every table in the local catalog, including at the single-group default, so a
+ * missing row is an incomplete/corrupt catalog and must fail closed.
  */
 bool
 catalog_lookup_s_table_group_number(DatabaseCatalog *catalog,
@@ -3635,9 +3635,6 @@ catalog_lookup_s_table_group_number(DatabaseCatalog *catalog,
 		return false;
 	}
 
-	/* default to group 0 when no assignment row exists */
-	*groupNumber = 0;
-
 	char *sql =
 		"select group_number from s_table_group_assignment where oid = $1";
 
@@ -3649,7 +3646,8 @@ catalog_lookup_s_table_group_number(DatabaseCatalog *catalog,
 
 	SQLiteQuery query = {
 		.context = groupNumber,
-		.fetchFunction = &catalog_lookup_s_table_group_number_fetch
+		.fetchFunction = &catalog_lookup_s_table_group_number_fetch,
+		.errorOnZeroRows = true
 	};
 
 	if (!catalog_sql_prepare(db, sql, &query))
@@ -3670,10 +3668,10 @@ catalog_lookup_s_table_group_number(DatabaseCatalog *catalog,
 		return false;
 	}
 
-	/* the query returns at most one row; zero rows leaves *groupNumber at 0 */
+	/* the query returns exactly one row */
 	if (!catalog_sql_execute_once(&query))
 	{
-		/* errors have already been logged */
+		log_error("Failed to lookup copy group assignment for table oid %u", oid);
 		(void) semaphore_unlock(&(catalog->sema));
 		return false;
 	}

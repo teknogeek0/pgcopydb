@@ -4,6 +4,7 @@
  */
 
 #include <errno.h>
+#include <dirent.h>
 #include <getopt.h>
 #include <inttypes.h>
 #include <sys/wait.h>
@@ -61,11 +62,30 @@ static bool parseTxnMetadataFile(const char *filename, LogicalMessageMetadata *m
 
 static bool computeTxnMetadataFilename(uint32_t xid, const char *dir, char *filename);
 
+static bool stream_apply_find_next_sql_file(StreamApplyContext *context,
+											const char *missingSQLFileName,
+											bool *found);
+
 static bool setupConnection(PGSQL *pgsql, StreamApplyContext *context);
 
 static bool extractTableNameFromPrepare(const char *stmt,
 										char *nspname, size_t nspnameSize,
 										char *relname, size_t relnameSize);
+
+static void skipSQLWhitespace(const char **ptr);
+static bool identifierCanBeUnquoted(const char *identifier);
+static bool quoteSQLIdentifierAlways(const char *identifier,
+									 char *quotedIdentifier,
+									 size_t quotedIdentifierSize);
+static bool parseSQLIdentifier(const char **ptr,
+							   char *identifier, size_t identifierSize);
+static bool parseSQLQualifiedTableName(const char *tableStart,
+									   char *nspname, size_t nspnameSize,
+									   char *relname, size_t relnameSize);
+static bool catalogLookupTableByParsedName(StreamApplyContext *context,
+										   const char *nspname,
+										   const char *relname,
+										   SourceTable *table);
 
 static bool shouldSkipChangeByThreshold(StreamApplyContext *context,
 										const char *nspname, const char *relname,
@@ -115,11 +135,13 @@ stream_apply_catchup(StreamSpecs *specs)
 		 * processes may still be creating it (this happens when
 		 * --defer-indexes delays apply start until after index building).
 		 *
-		 * For subsequent files (after applying at least one), exit
-		 * immediately so the main process can switch to replay mode.
+		 * If a later transformed SQL file already exists, this WAL segment was
+		 * empty for pgcopydb and must be skipped before switching to replay mode.
 		 */
 		if (!file_exists(context.sqlFileName))
 		{
+			bool foundNextSQLFile = false;
+
 			if (!appliedAnyFile)
 			{
 				int maxWaitSecs = 30;
@@ -137,14 +159,44 @@ stream_apply_catchup(StreamSpecs *specs)
 						break;
 					}
 
+					if (!stream_apply_find_next_sql_file(&context,
+														 currentSQLFileName,
+														 &foundNextSQLFile))
+					{
+						/* errors have already been logged */
+						(void) stream_apply_cleanup(&context);
+						return false;
+					}
+
+					if (foundNextSQLFile)
+					{
+						break;
+					}
+
 					if (asked_to_stop || asked_to_stop_fast || asked_to_quit)
 					{
 						break;
 					}
 				}
 			}
+			else if (!stream_apply_find_next_sql_file(&context,
+													  currentSQLFileName,
+													  &foundNextSQLFile))
+			{
+				/* errors have already been logged */
+				(void) stream_apply_cleanup(&context);
+				return false;
+			}
 
-			if (!file_exists(context.sqlFileName))
+			if (foundNextSQLFile)
+			{
+				log_notice("Skipping missing SQL file \"%s\"; "
+						   "next available file is \"%s\"",
+						   currentSQLFileName,
+						   context.sqlFileName);
+				strlcpy(currentSQLFileName, context.sqlFileName, MAXPGPATH);
+			}
+			else if (!file_exists(context.sqlFileName))
 			{
 				log_info("File \"%s\" does not exist yet, exit",
 						 context.sqlFileName);
@@ -717,7 +769,9 @@ stream_apply_sql(StreamApplyContext *context,
 			 * Remember this transaction's commit LSN for the --copy-groups
 			 * per-group threshold filter applied to its changes. When the commit
 			 * LSN is unknown (continuedTxn, txn spanning WAL segments) leave it
-			 * Invalid so the filter errs toward applying rather than skipping.
+			 * Invalid so group 0 can continue to apply everything while group
+			 * > 0 changes fail closed instead of making an unsafe threshold
+			 * decision.
 			 */
 			context->currentTxnCommitLSN =
 				txnCommitLSNFound ? metadata->txnCommitLSN : InvalidXLogRecPtr;
@@ -1206,6 +1260,10 @@ stream_apply_sql(StreamApplyContext *context,
 				{
 					strlcpy(stmt->nspname, nspname, sizeof(stmt->nspname));
 					strlcpy(stmt->relname, relname, sizeof(stmt->relname));
+				}
+				else
+				{
+					return false;
 				}
 
 				HASH_ADD(hh, stmtHashTable, hash, sizeof(hash), stmt);
@@ -1730,6 +1788,412 @@ computeSQLFileName(StreamApplyContext *context)
 
 
 /*
+ * stream_apply_find_next_sql_file finds the next transformed SQL file after a
+ * missing expected WAL-segment file. Some WAL segments legitimately contain no
+ * SQL output for pgcopydb, so transform never creates those .sql files. Apply
+ * must still consume later transformed files before switching to replay mode.
+ */
+static bool
+stream_apply_find_next_sql_file(StreamApplyContext *context,
+								const char *missingSQLFileName,
+								bool *found)
+{
+	*found = false;
+
+	const char *missingBaseName = strrchr(missingSQLFileName, '/');
+	missingBaseName =
+		missingBaseName == NULL ? missingSQLFileName : missingBaseName + 1;
+
+	DIR *dir = opendir(context->paths.dir);
+
+	if (dir == NULL)
+	{
+		log_error("Failed to open directory \"%s\": %m", context->paths.dir);
+		return false;
+	}
+
+	char candidate[MAXPGPATH] = { 0 };
+	struct dirent *entry = NULL;
+	size_t expectedLength = strlen(missingBaseName);
+
+	while ((entry = readdir(dir)) != NULL)
+	{
+		char *name = entry->d_name;
+		size_t nameLength = strlen(name);
+
+		if (nameLength != expectedLength ||
+			nameLength < 5 ||
+			!streq(name + nameLength - 4, ".sql") ||
+			strcmp(name, missingBaseName) <= 0)
+		{
+			continue;
+		}
+
+		if (IS_EMPTY_STRING_BUFFER(candidate) || strcmp(name, candidate) < 0)
+		{
+			strlcpy(candidate, name, sizeof(candidate));
+		}
+	}
+
+	if (closedir(dir) != 0)
+	{
+		log_error("Failed to close directory \"%s\": %m", context->paths.dir);
+		return false;
+	}
+
+	if (IS_EMPTY_STRING_BUFFER(candidate))
+	{
+		return true;
+	}
+
+	sformat(context->sqlFileName, sizeof(context->sqlFileName),
+			"%s/%s",
+			context->paths.dir,
+			candidate);
+
+	*found = true;
+	return true;
+}
+
+
+/*
+ * skipSQLWhitespace advances over whitespace that can appear around a
+ * schema/table separator in pgcopydb-generated SQL.
+ */
+static void
+skipSQLWhitespace(const char **ptr)
+{
+	while (**ptr == ' ' || **ptr == '\t')
+	{
+		(*ptr)++;
+	}
+}
+
+
+/*
+ * identifierCanBeUnquoted implements the part of PostgreSQL quote_ident()
+ * behavior that we can safely decide locally for catalog-name matching.
+ * Keyword handling is intentionally left to the lookup fallback below.
+ */
+static bool
+identifierCanBeUnquoted(const char *identifier)
+{
+	if (identifier == NULL || identifier[0] == '\0')
+	{
+		return false;
+	}
+
+	if (!((identifier[0] >= 'a' && identifier[0] <= 'z') ||
+		  identifier[0] == '_'))
+	{
+		return false;
+	}
+
+	for (int index = 1; identifier[index] != '\0'; index++)
+	{
+		char c = identifier[index];
+
+		if (!((c >= 'a' && c <= 'z') ||
+			  (c >= '0' && c <= '9') ||
+			  c == '_' ||
+			  c == '$'))
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+
+/*
+ * quoteSQLIdentifierAlways quotes an already dequoted identifier using SQL's
+ * doubled-quote escaping. It is used only as a catalog lookup fallback.
+ */
+static bool
+quoteSQLIdentifierAlways(const char *identifier,
+						 char *quotedIdentifier,
+						 size_t quotedIdentifierSize)
+{
+	if (quotedIdentifierSize < 3)
+	{
+		return false;
+	}
+
+	size_t length = 0;
+
+	quotedIdentifier[length++] = '"';
+
+	for (int index = 0; identifier[index] != '\0'; index++)
+	{
+		if (identifier[index] == '"')
+		{
+			if (length + 2 >= quotedIdentifierSize)
+			{
+				return false;
+			}
+
+			quotedIdentifier[length++] = '"';
+			quotedIdentifier[length++] = '"';
+		}
+		else
+		{
+			if (length + 1 >= quotedIdentifierSize)
+			{
+				return false;
+			}
+
+			quotedIdentifier[length++] = identifier[index];
+		}
+	}
+
+	if (length + 1 >= quotedIdentifierSize)
+	{
+		return false;
+	}
+
+	quotedIdentifier[length++] = '"';
+	quotedIdentifier[length] = '\0';
+
+	return true;
+}
+
+
+/*
+ * parseSQLIdentifier parses either an unquoted SQL identifier or a quoted
+ * PostgreSQL identifier, including doubled quotes inside quoted identifiers.
+ * It fails instead of truncating so threshold lookups never use a prefix that
+ * might name a different table. The returned identifier uses pgcopydb's source
+ * catalog spelling where possible: simple identifiers are unquoted, and names
+ * that require quoting keep SQL doubled-quote escaping.
+ */
+static bool
+parseSQLIdentifier(const char **ptr, char *identifier, size_t identifierSize)
+{
+	if (identifierSize == 0)
+	{
+		return false;
+	}
+
+	identifier[0] = '\0';
+
+	size_t length = 0;
+
+	if (**ptr == '"')
+	{
+		(*ptr)++;
+
+		char rawIdentifier[PG_NAMEDATALEN] = { 0 };
+		char quotedIdentifier[PG_NAMEDATALEN] = { 0 };
+		size_t rawLength = 0;
+		size_t quotedLength = 0;
+
+		if (quotedLength + 1 >= sizeof(quotedIdentifier))
+		{
+			return false;
+		}
+
+		quotedIdentifier[quotedLength++] = '"';
+
+		while (**ptr != '\0')
+		{
+			if (**ptr == '"')
+			{
+				if ((*ptr)[1] == '"')
+				{
+					if (rawLength + 1 >= sizeof(rawIdentifier) ||
+						quotedLength + 2 >= sizeof(quotedIdentifier))
+					{
+						return false;
+					}
+
+					rawIdentifier[rawLength++] = '"';
+					quotedIdentifier[quotedLength++] = '"';
+					quotedIdentifier[quotedLength++] = '"';
+					(*ptr) += 2;
+					continue;
+				}
+
+				(*ptr)++;
+
+				if (quotedLength + 2 >= sizeof(quotedIdentifier))
+				{
+					return false;
+				}
+
+				rawIdentifier[rawLength] = '\0';
+				quotedIdentifier[quotedLength++] = '"';
+				quotedIdentifier[quotedLength] = '\0';
+
+				if (rawLength == 0)
+				{
+					return false;
+				}
+
+				if (identifierCanBeUnquoted(rawIdentifier))
+				{
+					strlcpy(identifier, rawIdentifier, identifierSize);
+				}
+				else
+				{
+					strlcpy(identifier, quotedIdentifier, identifierSize);
+				}
+
+				return true;
+			}
+
+			if (rawLength + 1 >= sizeof(rawIdentifier) ||
+				quotedLength + 1 >= sizeof(quotedIdentifier))
+			{
+				return false;
+			}
+
+			rawIdentifier[rawLength++] = **ptr;
+			quotedIdentifier[quotedLength++] = **ptr;
+			(*ptr)++;
+		}
+
+		return false;
+	}
+
+	while (**ptr != '\0' &&
+		   **ptr != '.' &&
+		   **ptr != ' ' &&
+		   **ptr != '\t' &&
+		   **ptr != '(' &&
+		   **ptr != ';' &&
+		   **ptr != '\n' &&
+		   **ptr != '\r')
+	{
+		if (length + 1 >= identifierSize)
+		{
+			return false;
+		}
+
+		identifier[length++] = **ptr;
+		(*ptr)++;
+	}
+
+	identifier[length] = '\0';
+
+	return length > 0;
+}
+
+
+/*
+ * catalogLookupTableByParsedName looks up a table from names parsed out of SQL.
+ * The main lookup uses the parser's catalog spelling. When that misses, try
+ * quoted variants too: SQL generated from wal2json is often always-quoted,
+ * while the source catalog stores format('%I') output, which is unquoted for
+ * simple names and quoted for special or keyword names.
+ */
+static bool
+catalogLookupTableByParsedName(StreamApplyContext *context,
+							   const char *nspname,
+							   const char *relname,
+							   SourceTable *table)
+{
+	char quotedNspname[PG_NAMEDATALEN] = { 0 };
+	char quotedRelname[PG_NAMEDATALEN] = { 0 };
+
+	if (!quoteSQLIdentifierAlways(nspname,
+								  quotedNspname,
+								  sizeof(quotedNspname)) ||
+		!quoteSQLIdentifierAlways(relname,
+								  quotedRelname,
+								  sizeof(quotedRelname)))
+	{
+		return false;
+	}
+
+	const char *candidateNspnames[] = { nspname, quotedNspname };
+	const char *candidateRelnames[] = { relname, quotedRelname };
+
+	for (int n = 0; n < 2; n++)
+	{
+		for (int r = 0; r < 2; r++)
+		{
+			if (n == 1 && streq(candidateNspnames[0], candidateNspnames[1]))
+			{
+				continue;
+			}
+
+			if (r == 1 && streq(candidateRelnames[0], candidateRelnames[1]))
+			{
+				continue;
+			}
+
+			SourceTable candidate = { 0 };
+
+			if (!catalog_lookup_s_table_by_name(context->sourceDB,
+												candidateNspnames[n],
+												candidateRelnames[r],
+												&candidate))
+			{
+				return false;
+			}
+
+			if (candidate.oid != 0)
+			{
+				*table = candidate;
+				return true;
+			}
+		}
+	}
+
+	memset(table, 0, sizeof(SourceTable));
+	return true;
+}
+
+
+/*
+ * parseSQLQualifiedTableName parses [schema.]table from SQL generated by
+ * pgcopydb. All wal2json relation names are written with PQescapeIdentifier,
+ * so quoted identifiers are the common path.
+ */
+static bool
+parseSQLQualifiedTableName(const char *tableStart,
+						   char *nspname, size_t nspnameSize,
+						   char *relname, size_t relnameSize)
+{
+	char first[PG_NAMEDATALEN] = { 0 };
+	char second[PG_NAMEDATALEN] = { 0 };
+
+	const char *ptr = tableStart;
+
+	skipSQLWhitespace(&ptr);
+
+	if (!parseSQLIdentifier(&ptr, first, sizeof(first)))
+	{
+		return false;
+	}
+
+	skipSQLWhitespace(&ptr);
+
+	if (*ptr == '.')
+	{
+		ptr++;
+		skipSQLWhitespace(&ptr);
+
+		if (!parseSQLIdentifier(&ptr, second, sizeof(second)))
+		{
+			return false;
+		}
+
+		strlcpy(nspname, first, nspnameSize);
+		strlcpy(relname, second, relnameSize);
+	}
+	else
+	{
+		strlcpy(nspname, "public", nspnameSize);
+		strlcpy(relname, first, relnameSize);
+	}
+
+	return true;
+}
+
+
+/*
  * extractTableNameFromPrepare extracts the schema and table name from a
  * PREPARE statement like:
  *   PREPARE hash AS INSERT INTO "schema"."table" ...
@@ -1764,116 +2228,13 @@ extractTableNameFromPrepare(const char *stmt,
 		return false;
 	}
 
-	/* Skip whitespace */
-	while (*tableStart == ' ' || *tableStart == '\t')
+	if (!parseSQLQualifiedTableName(tableStart,
+									nspname, nspnameSize,
+									relname, relnameSize))
 	{
-		tableStart++;
+		log_error("Failed to parse table name in PREPARE statement: %s", stmt);
+		return false;
 	}
-
-	/* Parse quoted or unquoted identifiers */
-	const char *ptr = tableStart;
-	char schema[PG_NAMEDATALEN] = { 0 };
-	char table[PG_NAMEDATALEN] = { 0 };
-	int schemaLen = 0;
-	int tableLen = 0;
-	bool inSchema = true;
-
-	/* Parse first identifier (could be schema or table) */
-	if (*ptr == '"')
-	{
-		/* Quoted identifier */
-		ptr++; /* skip opening quote */
-		const char *start = ptr;
-		while (*ptr != '\0' && *ptr != '"')
-		{
-			ptr++;
-		}
-		schemaLen = ptr - start;
-		if (schemaLen >= PG_NAMEDATALEN)
-		{
-			schemaLen = PG_NAMEDATALEN - 1;
-		}
-		sformat(schema, sizeof(schema), "%.*s", schemaLen, start);
-
-		if (*ptr == '"')
-		{
-			ptr++; /* skip closing quote */
-		}
-	}
-	else
-	{
-		/* Unquoted identifier */
-		const char *start = ptr;
-		while (*ptr != '\0' && *ptr != '.' && *ptr != ' ' && *ptr != '(')
-		{
-			ptr++;
-		}
-		schemaLen = ptr - start;
-		if (schemaLen >= PG_NAMEDATALEN)
-		{
-			schemaLen = PG_NAMEDATALEN - 1;
-		}
-		sformat(schema, sizeof(schema), "%.*s", schemaLen, start);
-	}
-
-	/* Check if there's a dot (schema.table) */
-	while (*ptr == ' ' || *ptr == '\t')
-	{
-		ptr++;
-	}
-
-	if (*ptr != '.')
-	{
-		/* No schema qualifier, use "public" as default */
-		strlcpy(nspname, "public", nspnameSize);
-		strlcpy(relname, schema, relnameSize);
-		return true;
-	}
-
-	/* Skip the dot */
-	ptr++;
-
-	/* Skip whitespace after dot */
-	while (*ptr == ' ' || *ptr == '\t')
-	{
-		ptr++;
-	}
-
-	/* Parse table name */
-	if (*ptr == '"')
-	{
-		/* Quoted identifier */
-		ptr++; /* skip opening quote */
-		const char *start = ptr;
-		while (*ptr != '\0' && *ptr != '"')
-		{
-			ptr++;
-		}
-		tableLen = ptr - start;
-		if (tableLen >= PG_NAMEDATALEN)
-		{
-			tableLen = PG_NAMEDATALEN - 1;
-		}
-		sformat(table, sizeof(table), "%.*s", tableLen, start);
-	}
-	else
-	{
-		/* Unquoted identifier */
-		const char *start = ptr;
-		while (*ptr != '\0' && *ptr != ' ' && *ptr != '(')
-		{
-			ptr++;
-		}
-		tableLen = ptr - start;
-		if (tableLen >= PG_NAMEDATALEN)
-		{
-			tableLen = PG_NAMEDATALEN - 1;
-		}
-		sformat(table, sizeof(table), "%.*s", tableLen, start);
-	}
-
-	strlcpy(nspname, schema, nspnameSize);
-	strlcpy(relname, table, relnameSize);
 
 	return true;
 }
@@ -1889,9 +2250,10 @@ extractTableNameFromPrepare(const char *stmt,
  *
  * Returns false on an unrecoverable inconsistency (catalog query error, or a
  * group > 0 with no recorded threshold LSN); the caller must then abort rather
- * than risk a duplicate/lost apply. A table with no s_table row (a catalog /
- * system table) resolves to group 0 / threshold 0 ("apply everything"), which is
- * safe: group 0 is anchored at the earliest consistent point.
+ * than risk a duplicate/lost apply. A table with no s_table row is only safe
+ * when the stream is not using grouped copy thresholds; in grouped mode, fail
+ * closed because applying everything might replay a change already included in
+ * the table's COPY.
  */
 static bool
 groupThresholdForTable(StreamApplyContext *context,
@@ -1918,7 +2280,7 @@ groupThresholdForTable(StreamApplyContext *context,
 	{
 		SourceTable table = { 0 };
 
-		if (!catalog_lookup_s_table_by_name(context->sourceDB,
+		if (!catalogLookupTableByParsedName(context,
 											nspname, relname, &table))
 		{
 			/* errors have already been logged */
@@ -1948,6 +2310,19 @@ groupThresholdForTable(StreamApplyContext *context,
 				}
 			}
 		}
+		else if (context->copyGroups > 1)
+		{
+			log_error("Cannot find table \"%s\".\"%s\" in the source catalog "
+					  "while --copy-groups is enabled; aborting to avoid a "
+					  "duplicate or lost apply", nspname, relname);
+			return false;
+		}
+	}
+	else if (context->copyGroups > 1)
+	{
+		log_error("Cannot resolve copy-group threshold without a source "
+				  "catalog while --copy-groups is enabled");
+		return false;
 	}
 
 	entry = (GroupThresholdEntry *) calloc(1, sizeof(GroupThresholdEntry));
@@ -1997,9 +2372,18 @@ shouldSkipChangeByThreshold(StreamApplyContext *context,
 		return false;
 	}
 
-	/* no table name available (should not happen for DML/TRUNCATE): apply */
-	if (nspname == NULL || nspname[0] == '\0')
+	/*
+	 * No table name means we cannot safely place this change against a
+	 * per-group copy point. Fail closed rather than applying a change that
+	 * might already be included in the group's COPY.
+	 */
+	if (nspname == NULL || nspname[0] == '\0' ||
+		relname == NULL || relname[0] == '\0')
 	{
+		log_error("Cannot determine target table for a change while "
+				  "--copy-groups is enabled; aborting to avoid a duplicate "
+				  "or lost apply");
+		*ok = false;
 		return false;
 	}
 
@@ -2239,108 +2623,36 @@ parseSQLAction(const char *query, LogicalMessageMetadata *metadata,
 			tableStart++;
 		}
 
+		/*
+		 * pgcopydb writes TRUNCATE as "TRUNCATE ONLY schema.table".
+		 * The apply-side threshold must resolve the real relation name,
+		 * not the optional ONLY keyword.
+		 */
+		if (strncmp(tableStart, "ONLY ", 5) == 0)
+		{
+			tableStart += 5;
+			while (*tableStart == ' ' || *tableStart == '\t')
+			{
+				tableStart++;
+			}
+		}
+
 		char nspname[PG_NAMEDATALEN] = { 0 };
 		char relname[PG_NAMEDATALEN] = { 0 };
 
-		/* Parse schema.table from TRUNCATE statement */
-		const char *ptr = tableStart;
-		char schema[PG_NAMEDATALEN] = { 0 };
-		char table[PG_NAMEDATALEN] = { 0 };
-		int schemaLen = 0;
-
-		/* Parse first identifier */
-		if (*ptr == '"')
+		if (!parseSQLQualifiedTableName(tableStart,
+										nspname, sizeof(nspname),
+										relname, sizeof(relname)))
 		{
-			ptr++;
-			const char *start = ptr;
-			while (*ptr != '\0' && *ptr != '"')
-			{
-				ptr++;
-			}
-			schemaLen = ptr - start;
-			if (schemaLen >= PG_NAMEDATALEN)
-			{
-				schemaLen = PG_NAMEDATALEN - 1;
-			}
-			sformat(schema, sizeof(schema), "%.*s", schemaLen, start);
-			if (*ptr == '"')
-			{
-				ptr++;
-			}
-		}
-		else
-		{
-			const char *start = ptr;
-			while (*ptr != '\0' && *ptr != '.' && *ptr != ' ' && *ptr != ';')
-			{
-				ptr++;
-			}
-			schemaLen = ptr - start;
-			if (schemaLen >= PG_NAMEDATALEN)
-			{
-				schemaLen = PG_NAMEDATALEN - 1;
-			}
-			sformat(schema, sizeof(schema), "%.*s", schemaLen, start);
+			log_error("Failed to parse table name in TRUNCATE statement: %s",
+					  query);
+			return false;
 		}
 
-		/* Skip whitespace */
-		while (*ptr == ' ' || *ptr == '\t')
-		{
-			ptr++;
-		}
-
-		/* Check for dot separator */
-		if (*ptr == '.')
-		{
-			ptr++;
-			while (*ptr == ' ' || *ptr == '\t')
-			{
-				ptr++;
-			}
-
-			/* Parse table name */
-			if (*ptr == '"')
-			{
-				ptr++;
-				const char *start = ptr;
-				while (*ptr != '\0' && *ptr != '"')
-				{
-					ptr++;
-				}
-				int tableLen = ptr - start;
-				if (tableLen >= PG_NAMEDATALEN)
-				{
-					tableLen = PG_NAMEDATALEN - 1;
-				}
-				sformat(table, sizeof(table), "%.*s", tableLen, start);
-			}
-			else
-			{
-				const char *start = ptr;
-				while (*ptr != '\0' && *ptr != ' ' && *ptr != ';')
-				{
-					ptr++;
-				}
-				int tableLen = ptr - start;
-				if (tableLen >= PG_NAMEDATALEN)
-				{
-					tableLen = PG_NAMEDATALEN - 1;
-				}
-				sformat(table, sizeof(table), "%.*s", tableLen, start);
-			}
-
-			strlcpy(nspname, schema, sizeof(nspname));
-			strlcpy(relname, table, sizeof(relname));
-		}
-		else
-		{
-			/* No schema qualifier, use "public" as default */
-			strlcpy(nspname, "public", sizeof(nspname));
-			strlcpy(relname, schema, sizeof(relname));
-		}
-
-		/* remember the table so the apply can consult the --copy-groups
-		 * threshold for this TRUNCATE (applied directly, not via EXECUTE) */
+		/*
+		 * Remember the table so the apply can consult the --copy-groups
+		 * threshold for this TRUNCATE (applied directly, not via EXECUTE).
+		 */
 		strlcpy(metadata->nspname, nspname, sizeof(metadata->nspname));
 		strlcpy(metadata->relname, relname, sizeof(metadata->relname));
 
@@ -2420,6 +2732,10 @@ parseSQLAction(const char *query, LogicalMessageMetadata *metadata,
 							  "DELETE",
 							  nspname, relname);
 				}
+			}
+			else
+			{
+				return false;
 			}
 		}
 	}

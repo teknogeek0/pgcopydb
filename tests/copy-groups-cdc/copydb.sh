@@ -1,7 +1,7 @@
 #! /bin/bash
 
+set -euo pipefail
 set -x
-set -e
 
 # Disable pager for psql to avoid hanging in non-interactive environments
 export PAGER=cat
@@ -41,6 +41,7 @@ psql -v ON_ERROR_STOP=1 -d "${PGCOPYDB_SOURCE_PGURI}" -f /usr/src/pgcopydb/seed.
 #
 SAMPLE_FILE=/tmp/xmin-samples.txt
 : > "${SAMPLE_FILE}"
+: > /tmp/clone.log
 
 (
     while true
@@ -89,7 +90,7 @@ pgcopydb clone --follow --copy-groups 2 --plugin wal2json \
     --split-tables-larger-than 200kB 2>&1 | tee /tmp/clone.log
 
 # the data burst is short-lived; the nudger runs until we stop it here
-wait ${TRAFFIC_PID} || true
+wait ${TRAFFIC_PID}
 kill -TERM ${NUDGER_PID} 2>/dev/null || true
 wait ${NUDGER_PID} 2>/dev/null || true
 
@@ -137,12 +138,14 @@ lsn0=$(grep "Group 0 apply threshold LSN is" /tmp/clone.log \
        | grep -oE "[0-9A-Fa-f]+/[0-9A-Fa-f]+" | tail -1)
 lsn1=$(grep "Group 1 apply threshold LSN is" /tmp/clone.log \
        | grep -oE "[0-9A-Fa-f]+/[0-9A-Fa-f]+" | tail -1)
+common_lsn=$(grep "Common cutover LSN is" /tmp/clone.log \
+       | grep -oE "[0-9A-Fa-f]+/[0-9A-Fa-f]+" | tail -1)
 
-echo "per-group copy thresholds: group0=${lsn0} group1=${lsn1}"
+echo "per-group copy thresholds: group0=${lsn0} group1=${lsn1} common=${common_lsn}"
 
-if [ -z "${lsn0}" ] || [ -z "${lsn1}" ]
+if [ -z "${lsn0}" ] || [ -z "${lsn1}" ] || [ -z "${common_lsn}" ]
 then
-    echo "FAIL: could not read per-group copy threshold LSNs from the clone log"
+    echo "FAIL: could not read per-group/cutover LSNs from the clone log"
     exit 1
 fi
 
@@ -157,6 +160,32 @@ then
     exit 1
 fi
 
+for marker_file in /tmp/pre-g1-marker-lsn /tmp/post-g1-marker-lsn
+do
+    if ! grep -Eq '^[0-9A-Fa-f]+/[0-9A-Fa-f]+$' "${marker_file}" 2>/dev/null
+    then
+        echo "FAIL: expected marker LSN in ${marker_file}"
+        exit 1
+    fi
+done
+
+pre_g1_marker_lsn=$(cat /tmp/pre-g1-marker-lsn)
+post_g1_marker_lsn=$(cat /tmp/post-g1-marker-lsn)
+
+markers_ordered=$(psql -At -d "${PGCOPYDB_SOURCE_PGURI}" -c \
+    "select '${pre_g1_marker_lsn}'::pg_lsn <= '${lsn1}'::pg_lsn
+        and '${lsn1}'::pg_lsn < '${post_g1_marker_lsn}'::pg_lsn
+        and '${post_g1_marker_lsn}'::pg_lsn <= '${common_lsn}'::pg_lsn")
+
+echo "marker LSNs: pre_g1=${pre_g1_marker_lsn} post_g1=${post_g1_marker_lsn}"
+
+if [ "${markers_ordered}" != "t" ]
+then
+    echo "FAIL: marker transactions did not bracket the group 1 threshold and cutover"
+    echo "      group1=${lsn1} common=${common_lsn}"
+    exit 1
+fi
+
 echo "PASS: per-group snapshots advanced (group0 ${lsn0} -> group1 ${lsn1}) and" \
      "were released between groups; the copy never pins one snapshot for the run"
 
@@ -167,6 +196,43 @@ then
 else
     echo "  (backend_xmin numeric value did not visibly move this run — little" \
          "inter-group write traffic; the per-group release above is the guarantee)"
+fi
+
+dbfile=${TMPDIR}/pgcopydb/schema/source.db
+
+if [ ! -s "${dbfile}" ]
+then
+    echo "FAIL: expected source catalog at ${dbfile}"
+    exit 1
+fi
+
+assignments=$(sqlite3 -init /dev/null -batch -bail -noheader -list "${dbfile}" \
+    "select s.relname || '=' || a.group_number
+	 from s_table s
+	 join s_table_group_assignment a on a.oid = s.oid
+	where s.nspname = 'public'
+	  and (s.relname in ('customers', 'orders', 'scratch')
+	       or s.qname = 'public.' || char(34) || 'orders' ||
+	                    char(34) || char(34) || 'quoted' || char(34))
+	order by s.relname")
+
+expected_assignments=$(cat <<'EOF'
+"orders""quoted"=1
+customers=1
+orders=0
+scratch=1
+EOF
+)
+
+echo "copy-group assignments:"
+echo "${assignments}"
+
+if [ "${assignments}" != "${expected_assignments}" ]
+then
+    echo "FAIL: unexpected copy-group assignments"
+    echo "expected:"
+    echo "${expected_assignments}"
+    exit 1
 fi
 
 # assert the single-stream finalize ran: indexes whole-DB, apply caught up to
@@ -202,6 +268,24 @@ then
     exit 1
 fi
 
+fk_ok=$(psql -AtX -d "${PGCOPYDB_TARGET_PGURI}" -c \
+    "select count(*) = 1
+       from pg_constraint
+      where conname = 'orders_customer_id_fkey'
+        and contype = 'f'
+        and conrelid = 'public.orders'::regclass
+        and confrelid = 'public.customers'::regclass
+        and convalidated")
+
+if [ "${fk_ok}" != "t" ]
+then
+    echo "FAIL: expected valid orders_customer_id_fkey on target"
+    psql -d "${PGCOPYDB_TARGET_PGURI}" -c \
+        "select conname, contype, conrelid::regclass, confrelid::regclass, convalidated
+           from pg_constraint where conname = 'orders_customer_id_fkey'"
+    exit 1
+fi
+
 # explicitly re-validate the cross-group FK as a belt-and-suspenders check
 psql -v ON_ERROR_STOP=1 -d "${PGCOPYDB_TARGET_PGURI}" -c \
     "do \$\$
@@ -215,9 +299,9 @@ psql -v ON_ERROR_STOP=1 -d "${PGCOPYDB_TARGET_PGURI}" -c \
      end \$\$;"
 
 #
-# Final row-count sanity check on both tables, source vs target.
+# Final row-count sanity check on all test tables, source vs target.
 #
-for t in customers orders
+for t in customers orders scratch
 do
     s=$(psql -At -d "${PGCOPYDB_SOURCE_PGURI}" -c "select count(*) from ${t}")
     d=$(psql -At -d "${PGCOPYDB_TARGET_PGURI}" -c "select count(*) from ${t}")
@@ -230,6 +314,91 @@ do
         exit 1
     fi
 done
+
+quoted_source=$(psql -AtX -d "${PGCOPYDB_SOURCE_PGURI}" <<'SQL'
+select count(*),
+       count(*) filter (where id = 1 and payload = 'initial quoted table'),
+       count(*) filter (where id = 2 and payload = 'pre-g1 quoted marker')
+  from "orders""quoted";
+SQL
+)
+quoted_target=$(psql -AtX -d "${PGCOPYDB_TARGET_PGURI}" <<'SQL'
+select count(*),
+       count(*) filter (where id = 1 and payload = 'initial quoted table'),
+       count(*) filter (where id = 2 and payload = 'pre-g1 quoted marker')
+  from "orders""quoted";
+SQL
+)
+
+echo "quoted table state: source=${quoted_source} target=${quoted_target}"
+
+if [ "${quoted_source}" != "2|1|1" ] || [ "${quoted_target}" != "2|1|1" ]
+then
+    echo "FAIL: quoted table did not contain exactly the expected rows"
+    exit 1
+fi
+
+#
+# The scratch transaction intentionally runs TRUNCATE ONLY followed by inserts
+# while group 0 is copying. Row counts alone can miss a replay bug here, so also
+# assert the original rows are gone and only the post-truncate rows remain.
+#
+scratch_source=$(psql -AtX -d "${PGCOPYDB_SOURCE_PGURI}" -c \
+    "select count(*),
+            count(*) filter (where payload like 'post-truncate scratch %'),
+            count(*) filter (where payload like 'initial scratch %'),
+            count(*) filter (where payload = 'pre-g1-insert-only-marker'),
+            count(*) filter (where payload = 'pre-g1-update-marker'),
+            count(*) filter (where payload = 'pre-g1-updated-after-threshold'),
+            count(*) filter (where payload = 'pre-g1-delete-marker'),
+            count(*) filter (where payload = 'post-g1-apply-marker'),
+            count(*) filter (where payload = 'post-g1-updated-marker')
+       from scratch")
+scratch_target=$(psql -AtX -d "${PGCOPYDB_TARGET_PGURI}" -c \
+    "select count(*),
+            count(*) filter (where payload like 'post-truncate scratch %'),
+            count(*) filter (where payload like 'initial scratch %'),
+            count(*) filter (where payload = 'pre-g1-insert-only-marker'),
+            count(*) filter (where payload = 'pre-g1-update-marker'),
+            count(*) filter (where payload = 'pre-g1-updated-after-threshold'),
+            count(*) filter (where payload = 'pre-g1-delete-marker'),
+            count(*) filter (where payload = 'post-g1-apply-marker'),
+            count(*) filter (where payload = 'post-g1-updated-marker')
+       from scratch")
+
+echo "scratch state: source=${scratch_source} target=${scratch_target}"
+
+expected_scratch="8|5|0|1|0|1|0|0|1"
+
+if [ "${scratch_source}" != "${expected_scratch}" ] ||
+   [ "${scratch_target}" != "${expected_scratch}" ]
+then
+    echo "FAIL: scratch table did not contain exactly the expected threshold rows"
+    exit 1
+fi
+
+threshold_rows=$(sqlite3 -init /dev/null -batch -bail -noheader -list "${dbfile}" \
+    "select count(*)
+       from s_group_lsn
+      where group_number in (0, 1)
+        and threshold_lsn is not null")
+
+if [ "${threshold_rows}" != "2" ]
+then
+    echo "FAIL: expected threshold LSN rows for both copy groups"
+    exit 1
+fi
+
+tmp_slots=$(psql -AtX -d "${PGCOPYDB_SOURCE_PGURI}" -c \
+    "select count(*)
+       from pg_replication_slots
+      where slot_name like 'pgcopydb\_cgtmp\_g%' escape '\'")
+
+if [ "${tmp_slots}" != "0" ]
+then
+    echo "FAIL: found ${tmp_slots} leaked grouped-copy temporary slot(s)"
+    exit 1
+fi
 
 echo "PASS: copy-groups N=2 end-to-end migration is consistent"
 
