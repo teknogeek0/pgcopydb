@@ -291,6 +291,36 @@ clone_and_follow(CopyDataSpec *copySpecs)
 	 */
 	streamSpecs->copyGroups = groupCount;
 
+	if (groupCount > 1)
+	{
+		PGSQL srcValidation = { 0 };
+		bool sourceIsReadOnly = false;
+
+		if (!pgsql_init(&srcValidation,
+						copySpecs->connStrings.source_pguri,
+						PGSQL_CONN_SOURCE))
+		{
+			log_error("Failed to init connection for grouped-copy validation");
+			exit(EXIT_CODE_SOURCE);
+		}
+
+		if (!pgsql_is_in_recovery(&srcValidation, &sourceIsReadOnly))
+		{
+			log_error("Failed to check if source is in recovery");
+			pgsql_finish(&srcValidation);
+			exit(EXIT_CODE_SOURCE);
+		}
+
+		pgsql_finish(&srcValidation);
+
+		if (sourceIsReadOnly)
+		{
+			log_fatal("Option --copy-groups greater than 1 is not supported "
+					  "from a read-only standby source yet");
+			exit(EXIT_CODE_SOURCE);
+		}
+	}
+
 	/*
 	 * When using pgcopydb clone --follow --restart we first cleanup the
 	 * previous setup, and that includes dropping the replication slot.
@@ -1408,6 +1438,13 @@ clone_groups_barrier_cutover(CopyDataSpec *copySpecs,
 		return false;
 	}
 
+	if (!summary_start_timing(sourceDB, TIMING_SECTION_FINALIZE_SCHEMA))
+	{
+		/* errors have already been logged */
+		(void) catalog_close_from_specs(copySpecs);
+		return false;
+	}
+
 	if (!copydb_target_finalize_schema_indexes(copySpecs))
 	{
 		log_error("Failed to build indexes, see above for details");
@@ -1604,6 +1641,13 @@ clone_groups_barrier_cutover(CopyDataSpec *copySpecs,
 	if (!copydb_target_finalize_schema_constraints(copySpecs))
 	{
 		log_error("Failed to restore FK constraints, see above for details");
+		(void) catalog_close_from_specs(copySpecs);
+		return false;
+	}
+
+	if (!summary_stop_timing(sourceDB, TIMING_SECTION_FINALIZE_SCHEMA))
+	{
+		/* errors have already been logged */
 		(void) catalog_close_from_specs(copySpecs);
 		return false;
 	}
