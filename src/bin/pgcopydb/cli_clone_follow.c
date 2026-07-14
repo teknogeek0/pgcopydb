@@ -697,9 +697,26 @@ cli_follow(int argc, char **argv)
 	 */
 	bool logSQL = log_get_level() <= LOG_TRACE;
 
-	StreamSpecs specs = { 0 };
+	/*
+	 * One StreamSpecs per copy group; see clone_and_follow above. At the
+	 * single-group default this is a one-element array and element [0] drives
+	 * today's exact single-stream follow path. PR4 forks the N triplets over
+	 * the array.
+	 */
+	int groupCount = copySpecs.copyGroups >= 1 ? copySpecs.copyGroups : 1;
 
-	if (!stream_init_specs(&specs,
+	StreamSpecs *specsArray =
+		(StreamSpecs *) calloc(groupCount, sizeof(StreamSpecs));
+
+	if (specsArray == NULL)
+	{
+		log_error(ALLOCATION_FAILED_ERROR);
+		exit(EXIT_CODE_INTERNAL_ERROR);
+	}
+
+	StreamSpecs *specs = &(specsArray[0]);
+
+	if (!stream_init_specs(specs,
 						   &(copySpecs.cfPaths.cdc),
 						   &(copySpecs.connStrings),
 						   &(copyDBoptions.slot),
@@ -717,9 +734,18 @@ cli_follow(int argc, char **argv)
 	}
 
 	/*
+	 * Standalone `pgcopydb follow` does NOT run a grouped copy or the barrier
+	 * that records per-group thresholds, so the --copy-groups apply threshold
+	 * must stay inert here (copyGroups left at 1): this path applies every
+	 * change, exactly as before. The threshold only applies within the
+	 * clone --follow flow that populates s_group_lsn.
+	 */
+	specs->copyGroups = 1;
+
+	/*
 	 * First create/export a snapshot for the whole clone --follow operations.
 	 */
-	if (!follow_export_snapshot(&copySpecs, &specs))
+	if (!follow_export_snapshot(&copySpecs, specs))
 	{
 		/* errors have already been logged */
 		exit(EXIT_CODE_SOURCE);
@@ -729,7 +755,7 @@ cli_follow(int argc, char **argv)
 	 * First create the replication slot on the source database, and the origin
 	 * (replication progress tracking) on the target database.
 	 */
-	if (!follow_setup_databases(&copySpecs, &specs))
+	if (!follow_setup_databases(&copySpecs, specs))
 	{
 		/* errors have already been logged */
 		exit(EXIT_CODE_INTERNAL_ERROR);
@@ -746,7 +772,7 @@ cli_follow(int argc, char **argv)
 	 */
 	CopyDBSentinel sentinel = { 0 };
 
-	if (!follow_init_sentinel(&specs, &sentinel))
+	if (!follow_init_sentinel(specs, &sentinel))
 	{
 		/* errors have already been logged */
 		exit(EXIT_CODE_INTERNAL_ERROR);
@@ -786,10 +812,42 @@ cli_follow(int argc, char **argv)
 		exit(EXIT_CODE_SOURCE);
 	}
 
-	if (!follow_main_loop(&copySpecs, &specs))
+	if (!follow_main_loop(&copySpecs, specs))
 	{
 		/* errors have already been logged */
 		exit(EXIT_CODE_INTERNAL_ERROR);
+	}
+
+	/*
+	 * When CDC has durably reached endpos (cutover), reset the sequences on the
+	 * target database to their current values on the source. Postgres logical
+	 * decoding does not replicate sequences, so without this final step the
+	 * target sequences are left at the values captured during the initial base
+	 * copy. This mirrors what "clone --follow" does at the end of its run, and
+	 * makes a resumed follow that catches up to endpos safe to cut over from.
+	 *
+	 * We only do this once endpos is reached: an interrupted continuous follow
+	 * (no endpos, or stopped early by a signal) must not advance sequences ahead
+	 * of the data that was actually applied to the target.
+	 */
+	bool reachedEndpos = false;
+
+	if (!follow_reached_endpos(specs, &reachedEndpos))
+	{
+		/* errors have already been logged */
+		exit(EXIT_CODE_INTERNAL_ERROR);
+	}
+
+	if (reachedEndpos)
+	{
+		log_info("Resetting sequences on the target database to match the "
+				 "current values on the source database");
+
+		if (!follow_reset_sequences(&copySpecs, specs))
+		{
+			/* errors have already been logged */
+			exit(EXIT_CODE_TARGET);
+		}
 	}
 
 	/*
